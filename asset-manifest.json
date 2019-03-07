@@ -1,15 +1,15 @@
 {
-  "main.css": "/af-monorepo/static/css/main.d7d42664.chunk.css",
-  "main.js": "/af-monorepo/static/js/main.7f734cb7.chunk.js",
-  "main.js.map": "/af-monorepo/static/js/main.7f734cb7.chunk.js.map",
+  "main.css": "/af-monorepo/static/css/main.d84a524d.chunk.css",
+  "main.js": "/af-monorepo/static/js/main.ad95dd21.chunk.js",
+  "main.js.map": "/af-monorepo/static/js/main.ad95dd21.chunk.js.map",
   "static/css/1.cc2981c8.chunk.css": "/af-monorepo/static/css/1.cc2981c8.chunk.css",
   "static/js/1.003d9176.chunk.js": "/af-monorepo/static/js/1.003d9176.chunk.js",
   "static/js/1.003d9176.chunk.js.map": "/af-monorepo/static/js/1.003d9176.chunk.js.map",
   "runtime~main.js": "/af-monorepo/static/js/runtime~main.8928e9c4.js",
   "runtime~main.js.map": "/af-monorepo/static/js/runtime~main.8928e9c4.js.map",
-  "static/css/main.d7d42664.chunk.css.map": "/af-monorepo/static/css/main.d7d42664.chunk.css.map",
   "static/css/1.cc2981c8.chunk.css.map": "/af-monorepo/static/css/1.cc2981c8.chunk.css.map",
+  "static/css/main.d84a524d.chunk.css.map": "/af-monorepo/static/css/main.d84a524d.chunk.css.map",
   "index.html": "/af-monorepo/index.html",
-  "precache-manifest.25c79b3644dc3b9b26655767cbdd84c2.js": "/af-monorepo/precache-manifest.25c79b3644dc3b9b26655767cbdd84c2.js",
+  "precache-manifest.c4ed8c876d3bf41ee11b636fb323f0e7.js": "/af-monorepo/precache-manifest.c4ed8c876d3bf41ee11b636fb323f0e7.js",
   "service-worker.js": "/af-monorepo/service-worker.js"
 }
