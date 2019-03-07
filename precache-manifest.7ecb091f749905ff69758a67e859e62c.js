@@ -1,11 +1,11 @@
 self.__precacheManifest = [
   {
-    "revision": "0ad91fa297dea110d4ac",
-    "url": "/af-monorepo/static/css/main.3d5453d3.chunk.css"
+    "revision": "56f6f63910e307addbbe",
+    "url": "/af-monorepo/static/css/main.e4a8c524.chunk.css"
   },
   {
-    "revision": "0ad91fa297dea110d4ac",
-    "url": "/af-monorepo/static/js/main.0ad91fa2.chunk.js"
+    "revision": "56f6f63910e307addbbe",
+    "url": "/af-monorepo/static/js/main.56f6f639.chunk.js"
   },
   {
     "revision": "003d9176da5ea6f6f0aa",
@@ -20,7 +20,7 @@ self.__precacheManifest = [
     "url": "/af-monorepo/static/js/runtime~main.8928e9c4.js"
   },
   {
-    "revision": "0f49a9efe0a2053d394935bc74d6fa14",
+    "revision": "5be0a6e34203bff60501f58b45d3085a",
     "url": "/af-monorepo/index.html"
   }
 ];
