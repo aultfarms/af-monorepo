@@ -14,7 +14,7 @@
 importScripts("https://storage.googleapis.com/workbox-cdn/releases/3.6.3/workbox-sw.js");
 
 importScripts(
-  "/af-monorepo/precache-manifest.9b59ff5998ca58bc7144ea96dc0d3689.js"
+  "/af-monorepo/precache-manifest.deecc3e974ab6c05fae26cc0a822b94c.js"
 );
 
 workbox.clientsClaim();
