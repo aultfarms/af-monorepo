@@ -76,7 +76,7 @@
     "is-plain-object": "^5.0.0",
     "is-regexp": "^3.1.0",
     "jsonschema8": "^1.1.1",
-    "moment": "^2.29.1",
+    "moment": "^2.29.4",
     "moment-range": "^4.0.2",
     "numeral": "^2.0.6",
     "omit": "^1.0.1",
