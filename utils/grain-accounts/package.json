@@ -19,7 +19,7 @@
     "@aultfarms/accounts": "workspace:^",
     "chalk": "^4",
     "lodash": "^4.17.21",
-    "minimist": "^1.2.5",
+    "minimist": "^1.2.6",
     "moment": "^2.29.1",
     "moment-range": "^4.0.2",
     "numeral": "^2.0.6",
