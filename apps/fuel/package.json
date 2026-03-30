@@ -7,11 +7,15 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:libs": "yarn workspace @aultfarms/google build",
+    "predeploy": "yarn run build:libs && yarn run build",
+    "deploy": "gh-pages -d dist",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"
   },
   "dependencies": {
     "@aultfarms/google": "workspace:^",
+    "gh-pages": "^6.3.0",
     "jszip": "^3.10.1",
     "mobx": "^6.12.0",
     "mobx-react-lite": "^4.0.5",
@@ -20,6 +24,7 @@
     "react-dropzone": "^14.3.8"
   },
   "devDependencies": {
+    "@types/gh-pages": "^6",
     "@types/react": "^18.2.56",
     "@types/react-dom": "^18.2.19",
     "@typescript-eslint/eslint-plugin": "^7.0.2",
