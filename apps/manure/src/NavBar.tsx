@@ -19,12 +19,15 @@ export const NavBar = observer(() => {
 
   return (
     <AppBar position="static">
-      <Toolbar sx={{ display: 'flex', justifyContent:'space-between' }}>
-
-        <img style={{ paddingRight: '10px' }} src="/manure/aultfarms_logo.png" width="75"/>
+      <Toolbar sx={{ display: 'flex', justifyContent: 'space-between' }}>
+        <img alt="Ault Farms" style={{ paddingRight: '10px' }} src="/manure/aultfarms_logo.png" width="75" />
 
         <Typography variant="h6" sx={{ flexGrow: 1 }}>
           Manure
+        </Typography>
+
+        <Typography variant="body2" sx={{ mr: 2, display: { xs: 'none', md: 'block' } }}>
+          {state.network.online ? 'Online' : 'Offline'} • {state.auth.displayName || state.auth.email}{state.auth.admin ? ' • Admin' : ''}
         </Typography>
 
         <Button variant="contained" color="secondary" onClick={actions.plusLoad}>
@@ -32,8 +35,8 @@ export const NavBar = observer(() => {
         </Button>
 
         <Tooltip title="Re-Center Map">
-          <IconButton color="inherit" onClick={() => actions.mapView({ center: [state.currentGPS.lat, state.currentGPS.lon] })}>
-            <GpsFixedIcon/>
+          <IconButton color="inherit" onClick={() => actions.mapView({ center: [ state.currentGPS.lat, state.currentGPS.lon ] })}>
+            <GpsFixedIcon />
           </IconButton>
         </Tooltip>
 
@@ -47,10 +50,18 @@ export const NavBar = observer(() => {
           open={Boolean(anchorEl)}
           onClose={handleMenuClose}
         >
-          <MenuItem onClick={() => { actions.mode(state.mode === 'loads' ? 'fields' : 'loads'); handleMenuClose(); }}>Manage {state.mode === 'loads' ? 'Fields' : 'Loads'}</MenuItem>
-          <MenuItem onClick={() => { actions.toggleConfigModal(); handleMenuClose(); }}>Config</MenuItem>
+          <MenuItem disabled>{state.auth.email}</MenuItem>
+          <MenuItem disabled>Cache: {state.auth.cacheMode}</MenuItem>
+          <MenuItem onClick={() => { actions.mode(state.mode === 'loads' ? 'fields' : 'loads'); handleMenuClose(); }}>
+            Manage {state.mode === 'loads' ? 'Fields' : 'Loads'}
+          </MenuItem>
+          <MenuItem onClick={() => { actions.toggleConfigModal(); handleMenuClose(); }}>
+            Config
+          </MenuItem>
+          <MenuItem onClick={() => { actions.signOut(); handleMenuClose(); }}>
+            Sign out
+          </MenuItem>
         </Menu>
-
       </Toolbar>
     </AppBar>
   );

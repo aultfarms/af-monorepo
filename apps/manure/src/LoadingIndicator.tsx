@@ -1,4 +1,3 @@
-import React from 'react';
 import { Box, CircularProgress, Typography, Fade } from '@mui/material';
 
 export const LoadingIndicator = () => {

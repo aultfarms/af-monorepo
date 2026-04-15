@@ -12,8 +12,9 @@ export type TrelloAuthorizeParams = {
 export type TrelloRequestParams = {
   fields?: string, // name, id, closed, cards
   name?: string, // for posting new lists/boards/etc.
-  idList?: string, // for posting new cards
+  idList?: string, // for posting or updating cards
   desc?: string, // for posting new cards only
+  closed?: boolean, // for archiving cards
   pos?: "top" | "bottom" | number, // to position new cards
 };
 

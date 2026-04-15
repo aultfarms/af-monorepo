@@ -133,19 +133,54 @@ const request: TrelloRequestFunction = async (method, path, params) => {
   await waitUntilLoaded();
   const stringParams: Record<string,string> = {};
   for (const [key,val] of Object.entries(params)) {
+    if (val === undefined || val === null) continue;
     stringParams[key] = ''+val;
   }
-  stringParams['key'] = devKey;
-  stringParams['token'] = token;
-  const searchParams = new URLSearchParams(stringParams);
-  const joiner = path.indexOf('?') >= 0 ? '&' : '?';
-  path += joiner + searchParams.toString();
   if (path[0]!== '/') path = '/' + path;
-  const result = await fetch('https://api.trello.com/1'+path, {
-    method,
-  });
+  const url = new URL('https://api.trello.com/1'+path);
+  url.searchParams.set('key', devKey);
+  url.searchParams.set('token', token);
+
+  const requestInit: RequestInit = {
+    method: method.toUpperCase(),
+  };
+
+  if (method === 'get' || method === 'delete') {
+    for (const [key, value] of Object.entries(stringParams)) {
+      url.searchParams.set(key, value);
+    }
+  } else {
+    requestInit.body = new URLSearchParams(stringParams);
+  }
+
+  const result = await fetch(url.toString(), requestInit);
+  const responseText = await result.text();
+  if (!result.ok) {
+    let message = `${result.status} ${result.statusText}`;
+    if (responseText) {
+      try {
+        const errorBody = JSON.parse(responseText) as { message?: string };
+        if (typeof errorBody.message === 'string' && errorBody.message.trim()) {
+          message = `${message}: ${errorBody.message}`;
+        }
+      } catch (e) {
+        void e;
+      }
+    }
+    throw new Error(message);
+  }
+  if (!responseText) {
+    return [];
+  }
+
   // Check if we have a card, list, board, or org:
-  const body = await result.json();
+  let body: unknown;
+  try {
+    body = JSON.parse(responseText);
+  } catch (e) {
+    void e;
+    throw new Error(`ERROR: request did not return valid JSON for ${method.toUpperCase()} ${path}`);
+  }
   try { assertTrelloOrgs(body);   return  body;  } catch(e: any) {};
   try { assertTrelloOrg(body);    return [body]; } catch(e: any) {};
   try { assertTrelloBoards(body); return  body;  } catch(e: any) {};

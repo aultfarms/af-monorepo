@@ -1,10 +1,11 @@
 import React, { useEffect } from 'react';
 import { observer } from 'mobx-react-lite';
 import { context } from './state';
-import { MapContainer, TileLayer, Marker, Popup, useMapEvents, useMap, GeoJSON, FeatureGroup } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, useMapEvents, useMap, GeoJSON } from 'react-leaflet';
 import { Typography } from '@mui/material';
 import L from 'leaflet';
 import debug from 'debug';
+import type { Feature, Geometry } from 'geojson';
 
 import 'leaflet/dist/leaflet.css';
 import './Map.css';
@@ -79,9 +80,11 @@ export const Map = observer(() => {
     info('No geojson fields yet');
   }
 
-  const handleFieldClick = (feature: any) => {
-    const fieldName = feature.properties.name;
-    actions.load({ field: fieldName });
+  const handleFieldClick = (feature: Feature<Geometry, { name?: string }>) => {
+    const fieldName = feature.properties?.name;
+    if (fieldName) {
+      actions.load({ field: fieldName });
+    }
   };
 
   return (

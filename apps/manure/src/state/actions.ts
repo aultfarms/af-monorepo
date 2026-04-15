@@ -1,22 +1,26 @@
 import { action, runInAction } from 'mobx';
 import {
-  GPS,
-  state,
-  State,
-  defaultHeaders,
-  Field,
-  assertFields,
-  Source,
-  assertSources,
-  Driver,
   assertDrivers,
-  LoadsRecord,
+  assertFields,
   assertLoadsRecords,
-  FieldGeoJSON,
-  LoadsRecordGeoJSON,
-  LoadsRecordGeoJSONProps} from './state';
-import { sheets, drive } from '@aultfarms/google';
-import { FeatureCollection, Polygon, MultiPolygon, Feature, Point } from 'geojson';
+  assertSources,
+  emptyLoadRecord,
+  getAccessRecord,
+  isAccessEnabled,
+  loadManureAppData,
+  saveFields as persistFields,
+  saveLoadRecord,
+  type AccessRecord,
+  type Driver,
+  type Field,
+  type FieldGeoJSON,
+  type LoadsRecord,
+  type LoadsRecordGeoJSON,
+  type LoadsRecordGeoJSONProps,
+  type Source,
+} from '@aultfarms/manure';
+import { getCurrentUser, signInWithGoogle, signOutBrowserUser } from '@aultfarms/firebase';
+import type { Feature, FeatureCollection, MultiPolygon, Point, Polygon } from 'geojson';
 import JSZip from 'jszip';
 import * as toGeoJSON from '@tmcw/togeojson';
 import booleanPointInPolygon from '@turf/boolean-point-in-polygon';
@@ -24,89 +28,283 @@ import bbox from '@turf/bbox';
 import center from '@turf/center';
 import { point } from '@turf/helpers';
 import debug from 'debug';
-import { RowObject } from '@aultfarms/google/dist/sheets';
+import { state, type State } from './state';
 
 const info = debug('af/manure:info');
 const warn = debug('af/manure:warn');
-const error = debug('af/manure:error');
 
-const { ensureSpreadsheet,
-  spreadsheetToJson,
-  batchUpsertRows,
-  createWorksheetInSpreadsheet,
-  putRow,
-} = sheets;
-const { idFromPath } = drive;
+function createLoadPoint(current: State['currentGPS']): Feature<Point> {
+  return point([ current.lon, current.lat ]);
+}
+
+function refreshStoredLoadRecord(): void {
+  localStorage.setItem('af.manure.loadRecord', JSON.stringify(state.load));
+}
+
+function currentActorEmail(): string {
+  return state.auth.email || 'unknown@local';
+}
+
+function nextBlankLoad(): LoadsRecord {
+  return {
+    ...emptyLoadRecord(state.load.date),
+    field: state.load.field,
+    source: state.load.source,
+    driver: state.load.driver,
+  };
+}
+
+function mergeOrAppendLoad(nextLoad: LoadsRecord): LoadsRecord[] {
+  const existingIndex = state.loads.findIndex(loadRecord => loadRecord.id === nextLoad.id);
+  if (existingIndex >= 0) {
+    return state.loads.map((loadRecord, index) => index === existingIndex ? nextLoad : loadRecord);
+  }
+
+  return [ ...state.loads, nextLoad ];
+}
+
+async function loadSessionForUser(user: ReturnType<typeof getCurrentUser>): Promise<void> {
+  if (!user?.email) {
+    info('No authenticated Firebase user is available; applying signed-out state');
+    applySignedOutUser();
+    return;
+  }
+  info('Loading manure session for email=%s verified=%s', user.email, user.emailVerified);
+
+  loading(true);
+  loadingError('');
+  authState({
+    status: 'checking',
+    email: user.email,
+    displayName: user.displayName || user.email,
+    admin: false,
+    error: '',
+  });
+
+  try {
+    const accessRecord = await getAccessRecord(user.email);
+    if (!isAccessEnabled(accessRecord)) {
+      info('Manure access was denied or disabled for email=%s', user.email);
+      applyAccessDeniedUser({
+        email: user.email,
+        displayName: user.displayName || '',
+      });
+      return;
+    }
+
+    await applySignedInUser(
+      {
+        email: user.email,
+        displayName: user.displayName || '',
+      },
+      accessRecord,
+    );
+  } catch (error) {
+    warn('Manure session load failed for email=%s. Error=%O', user.email, error);
+    const message = `Error loading manure access: ${(error as Error).message}`;
+    resetSessionData();
+    authState({
+      status: 'signed_out',
+      email: user.email,
+      displayName: user.displayName || user.email,
+      admin: false,
+      error: message,
+    });
+    loadingError(message);
+    loading(false);
+  }
+}
+
+export const authState = action('authState', (auth: Partial<State['auth']>) => {
+  state.auth = {
+    ...state.auth,
+    ...auth,
+  };
+});
+
+export const online = action('online', (isOnline: boolean) => {
+  state.network.online = isOnline;
+});
+
+export const resetSessionData = action('resetSessionData', () => {
+  fields([]);
+  sources([]);
+  drivers([]);
+  loads([]);
+  state.load = nextBlankLoad();
+  refreshStoredLoadRecord();
+  fieldsChanged(false);
+});
+
+export const startSignIn = action('startSignIn', async () => {
+  info('Starting manure Google sign-in from UI');
+  loading(true);
+  loadingError('');
+  authState({
+    status: 'checking',
+    error: '',
+  });
+
+  try {
+    await signInWithGoogle();
+  } catch (error) {
+    warn('Manure Google sign-in failed. Error=%O', error);
+    loading(false);
+    authState({
+      status: 'signed_out',
+      error: `Unable to sign in: ${(error as Error).message}`,
+    });
+    loadingError(`Unable to sign in: ${(error as Error).message}`);
+  }
+});
+
+export const signOut = action('signOut', async () => {
+  info('Signing out manure user email=%s', state.auth.email);
+  loading(true);
+  try {
+    await signOutBrowserUser();
+  } catch (error) {
+    warn('Manure sign-out failed for email=%s. Error=%O', state.auth.email, error);
+    loading(false);
+    loadingError(`Unable to sign out: ${(error as Error).message}`);
+  }
+});
+
+export const applySignedInUser = action('applySignedInUser', async (
+  user: {
+    email: string;
+    displayName: string;
+  },
+  accessRecord: AccessRecord,
+) => {
+  info('Applying signed-in manure user email=%s admin=%s', user.email, accessRecord.admin);
+  authState({
+    status: 'signed_in',
+    email: user.email,
+    displayName: accessRecord.displayName || user.displayName || user.email,
+    admin: accessRecord.admin,
+    error: '',
+  });
+
+  await loadAllData();
+});
+
+export const applySignedOutUser = action('applySignedOutUser', () => {
+  info('Applying signed-out manure session state');
+  resetSessionData();
+  authState({
+    status: 'signed_out',
+    email: '',
+    displayName: '',
+    admin: false,
+    error: '',
+  });
+  loading(false);
+});
+
+export const applyAccessDeniedUser = action('applyAccessDeniedUser', (
+  user: {
+    email: string;
+    displayName: string;
+  },
+) => {
+  info('Applying manure access-denied state for email=%s', user.email);
+  resetSessionData();
+  authState({
+    status: 'access_denied',
+    email: user.email,
+    displayName: user.displayName || user.email,
+    admin: false,
+    error: 'This email is not currently on the manure access allowlist.',
+  });
+  loading(false);
+});
+
+export const loadAllData = action('loadAllData', async () => {
+  info('Loading all manure app data for year=%d', state.thisYear);
+  loading(true);
+  loadingError('');
+
+  try {
+    const data = await loadManureAppData(state.thisYear);
+    assertFields(data.fields);
+    assertSources(data.sources);
+    assertDrivers(data.drivers);
+    assertLoadsRecords(data.loads);
+    assertLoadsRecords(data.previousLoads);
+
+    fields(data.fields);
+    sources(data.sources);
+    drivers(data.drivers);
+    loads([ ...data.loads, ...data.previousLoads ]);
+    fieldsChanged(false);
+    load({});
+    info(
+      'Loaded manure app data for year=%d fields=%d sources=%d drivers=%d loads=%d previousLoads=%d',
+      state.thisYear,
+      data.fields.length,
+      data.sources.length,
+      data.drivers.length,
+      data.loads.length,
+      data.previousLoads.length,
+    );
+  } catch (error) {
+    warn('Error loading manure app data for year=%d. Error=%O', state.thisYear, error);
+    loadingError(`Error loading manure data: ${(error as Error).message}`);
+  } finally {
+    loading(false);
+  }
+});
 
 export const uploadKMZ = action('uploadKMZ', async (file: File) => {
   const newFields = await parseKMZIntoFields(file);
-  const stateFields = JSON.parse(JSON.stringify(state.fields)) as Field[];
+  const nextFields = JSON.parse(JSON.stringify(state.fields)) as Field[];
+
   for (const field of newFields) {
-    const existing = stateFields.find(f => f.name === field.name);
+    const existing = nextFields.find(existingField => existingField.name === field.name);
     if (existing) {
       existing.name = field.name;
       existing.boundary = field.boundary;
     } else {
-      stateFields.push(field);
+      nextFields.push(field);
     }
-    fieldsChanged(true); // user has to press save button to push to spreadsheet
-    fields(stateFields);
   }
+
+  fieldsChanged(true);
+  fields(nextFields);
 });
 
-export const fieldsChanged = action('fieldsChanged', (val: boolean) => {
-  state.fieldsChanged = val;
+export const fieldsChanged = action('fieldsChanged', (value: boolean) => {
+  state.fieldsChanged = value;
 });
 
 export const saveFields = action('saveFields', async () => {
   loading(true);
-  await upsertAllFields(); // fieldsChanged is updated by the loadAllSheets in this function
-  loading(false);
-});
-
-export const upsertAllFields = action('upsertAllFields', async () => {
   try {
-    const fields = state.fields;
-    const header = defaultHeaders.fields;
-    const rows: RowObject[] = [];
-    // Note: the "1" is to preserve the header in an otherwise empty sheet
-    let next_lineno = state.fields.reduce((max,f) => Math.max(max, f.lineno || 1), 1) + 1;
-
-    for (const field of fields) {
-      const row = {
-        lineno: field.lineno || next_lineno++,
-        name: field.name,
-        boundary: JSON.stringify(field.boundary),
-      }
-      rows.push(row);
-    }
-
-    await batchUpsertRows({
-      id: state.sheetIds.thisYear,
-      worksheetName: 'fields',
-      rows,
-      header,
-      insertOrUpdate: 'UPDATE',
-    });
-    info('Batch upserting fields as these rows: ', rows);
-
-    // Now re-load the entire sheet to grab new fields:
-    await loadAllSheets();
-  } catch (e: any) {
-    info('ERROR: could not upsertFields.  Error was: ', e);
-    snackbarMessage('Error updating fields:'+ e.message);
+    const savedFields = await persistFields(state.thisYear, state.fields, currentActorEmail());
+    fields(savedFields);
+    fieldsChanged(false);
+    snackbarMessage('Fields saved');
+  } catch (error) {
+    loadingError(`Error updating fields: ${(error as Error).message}`);
+  } finally {
+    loading(false);
   }
 });
 
-export async function parseKMZIntoFields(file: File): Promise<{ name: string; boundary: Field['boundary']}[]> {
+export async function parseKMZIntoFields(file: File): Promise<{ name: string; boundary: Field['boundary'] }[]> {
   const arrayBuffer = await file.arrayBuffer();
   const zip = await JSZip.loadAsync(arrayBuffer);
-  const kmlFile = Object.values(zip.files).find(f => f.name.endsWith('.kml'));
-  if (!kmlFile) throw new Error('No KML file found in KMZ');
+  const kmlFile = Object.values(zip.files).find(candidate => candidate.name.endsWith('.kml'));
+  if (!kmlFile) {
+    throw new Error('No KML file found in KMZ');
+  }
+
   const kmlText = await kmlFile.async('text');
   const parser = new DOMParser();
   const kmlDom = parser.parseFromString(kmlText, 'text/xml');
   const geoJson = toGeoJSON.kml(kmlDom);
+
   return geoJson.features
     .filter(feature => feature.geometry?.type === 'Polygon' || feature.geometry?.type === 'MultiPolygon')
     .map(feature => ({
@@ -120,11 +318,13 @@ export const fieldName = action('fieldName', (oldName: string, newName: string) 
     snackbarMessage('Field name cannot be empty');
     return;
   }
-  if (state.fields.find(f => f.name === newName && f.name !== oldName)) {
+
+  if (state.fields.find(field => field.name === newName && field.name !== oldName)) {
     snackbarMessage('Field name already exists');
     return;
   }
-  const fieldIndex = state.fields.findIndex(f => f.name === oldName);
+
+  const fieldIndex = state.fields.findIndex(field => field.name === oldName);
   if (fieldIndex >= 0) {
     fieldsChanged(true);
     state.fields[fieldIndex]!.name = newName;
@@ -132,52 +332,47 @@ export const fieldName = action('fieldName', (oldName: string, newName: string) 
 });
 
 export const fieldBoundary = action('fieldBoundary', (name: string, boundary: Field['boundary']) => {
-  const fieldIndex = state.fields.findIndex(f => f.name === name);
+  const fieldIndex = state.fields.findIndex(field => field.name === name);
   if (fieldIndex >= 0) {
     fieldsChanged(true);
     state.fields[fieldIndex]!.boundary = boundary;
   } else {
-    info('WARNING: could not find field with name ', name);
+    info('Could not find field with name %s', name);
   }
 });
-
 
 export const plusLoad = action('plusLoad', async () => {
-  runInAction(() => state.load.loads++);
-  return saveLoad();
-});
-
-export const saveLoad = action('saveLoad', async () => {
-  const load = state.load;
-  if (!load.lineno) {
-    snackbarMessage('ERROR: did not have a line number for this load record.  That should not happen.');
-    return;
-  }
-
-  if (!load.date || !load.field ||!load.source ||!load.driver) {
+  if (!state.load.date || !state.load.field || !state.load.source || !state.load.driver) {
     snackbarMessage('Cannot record load without a date, field, source, and driver');
     return;
   }
 
-  const header = defaultHeaders.loads;
-  const row: RowObject = {
-    ...load,
-    lineno: load.lineno || 2,
-    geojson: JSON.stringify(load.geojson),
-  };
-  await batchUpsertRows({
-    id: state.sheetIds.thisYear,
-    worksheetName: 'loads',
-    rows: [ row ],
-    header,
-    insertOrUpdate: 'UPDATE',
+  runInAction(() => {
+    state.load.loads += 1;
+    state.load.geojson = {
+      ...state.load.geojson,
+      features: [ ...state.load.geojson.features, createLoadPoint(state.currentGPS) ],
+    };
   });
-  info('Loads record saved: ', row);
+
+  await saveLoad();
 });
 
-//----------------------
-// View
-//----------------------
+export const saveLoad = action('saveLoad', async () => {
+  const currentLoad = state.load;
+  if (!currentLoad.date || !currentLoad.field || !currentLoad.source || !currentLoad.driver) {
+    snackbarMessage('Cannot record load without a date, field, source, and driver');
+    return;
+  }
+
+  try {
+    const savedLoad = await saveLoadRecord(state.thisYear, currentLoad, currentActorEmail());
+    loads(mergeOrAppendLoad(savedLoad));
+    load(savedLoad);
+  } catch (error) {
+    loadingError(`Error saving load: ${(error as Error).message}`);
+  }
+});
 
 export const toggleConfigModal = action('toggleConfigModal', () => {
   state.config.modalOpen = !state.config.modalOpen;
@@ -186,31 +381,29 @@ export const toggleConfigModal = action('toggleConfigModal', () => {
 export const snackbarMessage = action('snackbarMessage', (message: string) => {
   state.snackbar.open = true;
   state.snackbar.message = message;
-  info('Snackbar: ', message);
 });
+
 export const closeSnackbar = action('closeSnackbar', () => {
   state.snackbar.open = false;
 });
 
-export const loading = action('loading', (loading: boolean) => {
-  state.loading = loading;
+export const loading = action('loading', (isLoading: boolean) => {
+  state.loading = isLoading;
 });
 
-export const loadingError = action('loadingError', (error: string) => {
-  state.loadingError = error;
-  snackbarMessage(error);
+export const loadingError = action('loadingError', (errorMessage: string) => {
+  state.loadingError = errorMessage;
+  if (errorMessage) {
+    snackbarMessage(errorMessage);
+  }
 });
 
-
-//---------------------
-// GPS and Map
-//---------------------
-
-let _latestBrowserGPS : GPS = { lat: 0, lon: 0 };
-export const currentGPS = action('currentGPS', async (coords: GPS, notReallyFromBrowser?: boolean) => {
+let latestBrowserGPS: { lat: number; lon: number } = { lat: 0, lon: 0 };
+export const currentGPS = action('currentGPS', (coords: { lat: number; lon: number }, notReallyFromBrowser?: boolean) => {
   state.currentGPS = coords;
+  localStorage.setItem('af.manure.currentGPS', JSON.stringify(coords));
   if (!notReallyFromBrowser) {
-    _latestBrowserGPS = { ...coords };
+    latestBrowserGPS = { ...coords };
   }
 });
 
@@ -220,15 +413,13 @@ export const mapView = action('mapView', (map: Partial<State['mapView']>) => {
     ...map,
   };
   localStorage.setItem('af.manure.map', JSON.stringify(state.mapView));
-  // If map GPS mode is selected, then the map center has to be curretn GPS coords:
   if (state.gpsMode === 'map') {
-    // Note "true" to tell currentGPS this is not really from the browser
     currentGPS({ lat: state.mapView.center[0], lon: state.mapView.center[1] }, true);
   }
 });
 
 export const moveMapToField = action('moveMapToField', (fieldName: string) => {
-  const field = state.fields.find(f => f.name === fieldName);
+  const field = state.fields.find(candidate => candidate.name === fieldName);
   if (!field) {
     snackbarMessage(`Field "${fieldName}" not found`);
     return;
@@ -236,379 +427,200 @@ export const moveMapToField = action('moveMapToField', (fieldName: string) => {
 
   const fieldFeature = field.boundary as Feature<Polygon | MultiPolygon>;
   const fieldCenter = center(fieldFeature).geometry.coordinates as [number, number];
-  const fieldBbox = bbox(fieldFeature); // [minLng, minLat, maxLng, maxLat]
-
-  // Approximate zoom level based on bounding box size (latitude/longitude span)
+  const fieldBbox = bbox(fieldFeature);
   const latDiff = fieldBbox[3] - fieldBbox[1];
   const lngDiff = fieldBbox[2] - fieldBbox[0];
   const maxDiff = Math.max(latDiff, lngDiff);
-  // Rough zoom calculation: adjust these values based on your map's typical size
   const zoom = Math.min(18, Math.max(10, Math.floor(16 - Math.log2(maxDiff * 100))));
 
-  // Update map view to center on the field with calculated zoom
   mapView({
-    center: [fieldCenter[1], fieldCenter[0]], // Turf gives [lng, lat], Leaflet needs [lat, lng]
+    center: [ fieldCenter[1], fieldCenter[0] ],
     zoom,
   });
 });
 
-export const gpsMode = action('gpsMode', (gpsMode: State['gpsMode']) => {
-  state.gpsMode = gpsMode;
-  if (gpsMode === 'me') { // switching back to 'me' needs to re-load my coords
-    currentGPS(_latestBrowserGPS, true);
-  } else { // map: initialize to map center
+export const gpsMode = action('gpsMode', (nextMode: State['gpsMode']) => {
+  state.gpsMode = nextMode;
+  if (nextMode === 'me') {
+    currentGPS(latestBrowserGPS, true);
+  } else {
     currentGPS({ lat: state.mapView.center[0], lon: state.mapView.center[1] }, true);
   }
 });
 
-export const mode = action('mode', (mode: 'loads' | 'fields') => {
-  state.mode = mode;
+export const mode = action('mode', (nextMode: 'loads' | 'fields') => {
+  state.mode = nextMode;
 });
 
 export const editingField = action('editingField', (name: string) => {
   state.editingField = name;
 });
 
-
-//---------------------
-// Loads
-//---------------------
-
-// Form changes:
-export const load = action('load', (r: Partial<LoadsRecord>) => {
+export const load = action('load', (record: Partial<LoadsRecord>) => {
   state.load = {
     ...state.load,
-    ...r,
+    ...record,
   };
-  delete state.load.lineno; // no lineno until we see if this record already exists in the list of known loads
-  const knownLoad = state.loads.find(l =>
-    l.date === state.load.date
-    && l.source === state.load.source
-    && l.field === state.load.field
-    && l.driver === state.load.driver
+
+  delete state.load.id;
+  delete state.load.createdAt;
+  delete state.load.updatedAt;
+  delete state.load.updatedBy;
+
+  const knownLoad = state.loads.find(loadRecord =>
+    loadRecord.date === state.load.date
+    && loadRecord.source === state.load.source
+    && loadRecord.field === state.load.field
+    && loadRecord.driver === state.load.driver,
   );
+
   if (knownLoad) {
-    state.load.lineno = knownLoad.lineno;
-    if (!('loads' in r)) { // If this change is not to the loads count, go ahead and pre-load what's in the existing list as the loads count
+    state.load.id = knownLoad.id;
+    state.load.createdAt = knownLoad.createdAt;
+    state.load.updatedAt = knownLoad.updatedAt;
+    state.load.updatedBy = knownLoad.updatedBy;
+    if (!('loads' in record)) {
       state.load.loads = knownLoad.loads;
     }
+    if (!('geojson' in record)) {
+      state.load.geojson = knownLoad.geojson;
+    }
   } else {
-    const maxLineno = state.loads.reduce((max, l) => Math.max(max, l.lineno || 1), 1); // the "1" is for the header row
-    state.load.lineno = maxLineno + 1;
-    if (!('loads' in r)) {
-      state.load.loads = 0; // if this makes a new load, initialize it to 0 loads
+    if (!('loads' in record)) {
+      state.load.loads = 0;
+    }
+    if (!('geojson' in record)) {
+      state.load.geojson = { type: 'FeatureCollection', features: [] };
     }
   }
 
-  localStorage.setItem('af.manure.loadRecord', JSON.stringify(state.load));
+  refreshStoredLoadRecord();
 });
 
-//---------------------
-// Fields
-//---------------------
-
-export const autoselectField = action(() => {
+export const autoselectField = action('autoselectField', () => {
   const { lat, lon } = state.currentGPS;
   if (!lat || !lon) {
     warn('No current GPS coordinates available');
     return;
   }
 
-  // Create a Turf.js point from currentGPS
-  const gpsPoint = point([lon, lat]); // Turf expects [lng, lat]
-
-  // Find the field containing the point
-  const selectedField = state.fields.find((field) => {
+  const gpsPoint = point([ lon, lat ]);
+  const selectedField = state.fields.find(field => {
     try {
       return booleanPointInPolygon(gpsPoint, field.boundary);
-    } catch (error: any) {
-      warn(`Error parsing boundary for field ${field.name}:`, error);
+    } catch (error) {
+      warn('Error parsing boundary for field %s: %O', field.name, error);
       return false;
     }
   });
 
   if (selectedField) {
     state.load.field = selectedField.name;
+    refreshStoredLoadRecord();
   } else {
     snackbarMessage('No field found containing current GPS coordinates');
   }
 });
 
-
-//----------------------------------
-// Spreadsheets
-//----------------------------------
-
-export const sheetIds = action('sheetIds', (sheetIds: Partial<State['sheetIds']>) => {
-  state.sheetIds = {
-    ...state.sheetIds,
-    ...sheetIds,
-  };
-  localStorage.setItem('af.manure.sheetIds', JSON.stringify(state.sheetIds));
-  // Note: this does not trigger a full reload of everything, you have to call that yourself.
-});
-
-export const loadAllSheets = action('loadAllSheets', async () => {
-  loading(true);
-  loadingError('');
-  const thisYear = new Date().getFullYear();
-  const lastYear = thisYear - 1;
-
-  const thisYearPath = 'Ault Farms Operations/ManureRecords/'+thisYear+'_ManureRecords';
-  const lastYearPath = 'Ault Farms Operations/ManureRecords/'+lastYear+'_ManureRecords';
-
-  try {
-    if (!state.sheetIds.thisYear) {
-      info('There is no sheetId for this year, ensuring they exist to load them');
-      // This puts id's into state.sheetIds
-      await ensureManureSheets(thisYearPath, lastYearPath);
-    } else {
-      info('Already have a sheetId for this year, will double-check it after everything loads');
-    }
-
-    info('Loading spreadsheetToJson for id ', state.sheetIds.thisYear);
-    const thisYearSheet = await spreadsheetToJson({ id: state.sheetIds.thisYear });
-    info('Load this year:', thisYearSheet);
-    let lastYearSheet: typeof thisYearSheet | null = null;
-    info('Loading last year for id if truthy: ', state.sheetIds.lastYear);
-    if (state.sheetIds.lastYear) lastYearSheet = await spreadsheetToJson({ id: state.sheetIds.lastYear});
-    // Grab all the records and load into the state:
-    info('This year and last year loaded.  Last year = ', lastYearSheet);
-    await loadFields(thisYearSheet);
-    await loadSources(thisYearSheet);
-    await loadDrivers(thisYearSheet);
-    await loadLoads(thisYearSheet, lastYearSheet);
-    fieldsChanged(false); // fields are now in sync w/ spreadsheet
-    loading(false);
-  } catch(e: any) {
-    loadingError('Reload page.  There was an error loading spreadsheets: '+ e.message);
-    info('Invalidating sheet cache in case the error needs new sheets');
-    sheetIds({ thisYear: '', lastYear: '' });
-    return;
-  }
-
-  // Fire off check to make sure that's still the sheetId.
-  if (state.sheetIds.thisYear) {
-    try {
-      const { id } = await idFromPath({ path: thisYearPath });
-      if ( id !== state.sheetIds.thisYear) {
-        snackbarMessage('WARNING: current sheet in google has changed its id, refresh your browser')
-        sheetIds({ thisYear: '', lastYear: '' });
-      }
-    } catch(e: any) {
-      snackbarMessage('WARNING: current sheet in google has changed its id, refresh your browser')
-      sheetIds({ thisYear: '', lastYear: '' });
-    }
-  }
-
-  if (state.sheetIds.lastYear) {
-    try {
-      const { id } = await idFromPath({ path: lastYearPath });
-      if ( id !== state.sheetIds.lastYear) {
-        snackbarMessage('WARNING: current sheet in google has changed its id, reloading new sheet')
-        sheetIds({ lastYear: '' });
-        loadAllSheets(); // recursively call ourselves now that the sheet id's are cleared out
-      }
-    } catch(e: any) {
-      snackbarMessage('WARNING: last year spreadsheet in google has changed its id, refresh your browser')
-      info('No last year spreadsheet found in cached id check.');
-      sheetIds({ lastYear: '' });
-    };
-  }
-
-});
-
-async function ensureManureSheets(thisYearPath: string, lastYearPath: string): Promise<void> {
-  snackbarMessage('Loading spreadsheets from Google Drive');
-  try {
-
-    // Make sure this year exists:
-    info('Ensuring spreadsheet for this year.');
-    const thisYearInfo = await ensureSpreadsheet({ path: thisYearPath });
-    info('This year spreadsheet ensured, info = ', thisYearInfo);
-
-    // See if we have anything from last year:
-    let lastYearInfo: { id: string } | null = null;
-    try {
-      lastYearInfo = await idFromPath({ path: lastYearPath });
-      info('Found last year spreadsheet in google drive, id = ', lastYearInfo.id);
-    } catch(e: any) {
-      info('No last year spreadsheet found.');
-    }
-    info('Last year spreadsheet idFromPath returned: ', lastYearInfo);
-
-    if (!thisYearInfo) {
-      throw new Error('Failed to check spreadsheets in Google Drive');
-    }
-    const { id, createdSpreadsheet } = thisYearInfo;
-
-    const newSheetIds = {
-      thisYear: id,
-      lastYear: lastYearInfo?.id || '',
-    }
-    sheetIds(newSheetIds);
-
-    // If the sheet was created, populate it either from original lastYear,
-    // or just initialize headers on empty sheets
-    if (createdSpreadsheet) {
-      // Grab last year as template if it exists:
-      const lastYearData = (lastYearInfo && lastYearInfo.id) ? await spreadsheetToJson({ id: lastYearInfo.id }) : null;
-      info('lastYearData = ', lastYearData);
-
-      // Create and populate metadata sheets:
-      for (const worksheetName of (['fields','sources', 'drivers', 'loads'] as (keyof typeof defaultHeaders)[])) {
-        info('Creating worksheet ', worksheetName);
-        const json = lastYearData?.[worksheetName];
-        const header = json?.header || defaultHeaders[worksheetName];
-        const rows = json?.data.map((f, index) => ({ ...f, lineno: index+2 }));
-        await createWorksheetInSpreadsheet({ id, worksheetName });
-        // loads sheet is never copied from year to year
-        if (worksheetName !== 'loads' && json && json.header.length > 0 && rows) {
-          info('Have previous year data for template, batchUpserting it for worksheet ', worksheetName);
-          await batchUpsertRows({ id, worksheetName, rows, header, insertOrUpdate: 'UPDATE' });
-        } else {
-          info('Have no previous year data, putting headers for worksheet ', worksheetName);
-          await putRow({ id, worksheetName, row: '1', cols: header });
-        }
-      }
-      info('All worksheets created in new spreadsheet successfully');
-    }
-  } catch(e: any) {
-    snackbarMessage('Error loading spreadsheets from Google Drive:'+ e.message);
-    error('ERROR: ensureManureSheets: failed to ensure sheets.  Error was: ', e);
-  }
-}
-
-// Helper function to populate lineno on all arrays
-function addLineno(a: any[]) {
-  for (const [index, obj] of a.entries()) {
-    obj['lineno'] = index+2;
-  }
-}
-
-//------------------------------------------
-// Fields
-//------------------------------------------
-
-export const fields = action('fields', (fields: Field[]) => {
-  state.fields = fields;
-  // Squash all fields into single geojson for rendering
+export const fields = action('fields', (nextFields: Field[]) => {
+  state.fields = nextFields;
   const geojson: FieldGeoJSON = {
     type: 'FeatureCollection',
-    features: fields.map(field => ({
+    features: nextFields.map(field => ({
       ...field.boundary,
       properties: { name: field.name },
     })),
   };
   geojsonFields(geojson);
 });
-let _geojsonFields: FeatureCollection<Polygon | MultiPolygon> = { type : 'FeatureCollection', features: [] };
-export const geojsonFields = action('geojsonFields', (gflds?: FeatureCollection<Polygon | MultiPolygon>) => {
-  if (gflds) {
-    _geojsonFields = gflds;
-    state.geojsonFields.rev++;
+
+let cachedGeojsonFields: FeatureCollection<Polygon | MultiPolygon> = { type: 'FeatureCollection', features: [] };
+export const geojsonFields = action('geojsonFields', (geojson?: FeatureCollection<Polygon | MultiPolygon>) => {
+  if (geojson) {
+    cachedGeojsonFields = geojson;
+    state.geojsonFields.rev += 1;
   }
-  return _geojsonFields;
-})
-export const loadFields = action('loadFields', async (thisYearSheet: any) => {
-  const flds = thisYearSheet?.fields || { header: [], data: [] };
-  if (!Array.isArray(flds.data)) throw new Error('fields sheet is not an array');
-  addLineno(flds.data);
-  // Convert all the geojson strings back to objects
-  for (const f of flds.data) {
-    if ('boundary' in f) {
-      f.boundary = JSON.parse(f.boundary);
-    }
-  }
-  assertFields(flds.data);
-  fields(flds.data);
+  return cachedGeojsonFields;
 });
 
-//-----------------------------
-// Sources
-//-----------------------------
-
-// If google sheets returns numbers, they are strings.  Handy function
-// to just sanitize things to be numbers if they look like numbers
-function stringsToNumbers(arr: any[]) {
-  for (const obj of arr) {
-    if (typeof obj !== 'object') continue;
-    for (const [key, val] of Object.entries(obj)) {
-      if (typeof val ==='string' && val.match(/^[\-\.0-9]+$/)) {
-        const num = parseFloat(val);
-        if (!isNaN(num)) {
-          obj[key] = num;
-        }
-      }
-    }
-  }
-}
-
-export const sources = action('sources', (sources: Source[]) => {
-  state.sources = sources;
-});
-export const loadSources = action('loadSources', async (thisYearSheet: any) => {
-  const srcs = thisYearSheet?.sources || {  header: [], data: [] };
-  if (!Array.isArray(srcs.data)) throw new Error('sources sheet is not an array');
-  // have to turn the acPerLoad into numbers
-  addLineno(srcs.data);
-  stringsToNumbers(srcs.data);
-  assertSources(srcs.data);
-  sources(srcs.data);
+export const sources = action('sources', (nextSources: Source[]) => {
+  state.sources = nextSources;
 });
 
-//--------------------------------
-// Drivers
-//--------------------------------
-
-export const drivers = action('drivers', (drivers: Driver[]) => {
-  state.drivers = drivers;
-});
-export const loadDrivers = action('loadDrivers', async (thisYearSheet: any) => {
-  const drs = thisYearSheet?.drivers || {  header: [], data: [] };
-  if (!Array.isArray(drs.data)) throw new Error('drivers sheet is not an array');
-  addLineno(drs.data);
-  assertDrivers(drs.data);
-  drivers(drs.data);
+export const drivers = action('drivers', (nextDrivers: Driver[]) => {
+  state.drivers = nextDrivers;
 });
 
-//-----------------------------
-// LoadsRecords
-//-----------------------------
-
-export const loads = action('loads', (loadsRecords: LoadsRecord[]) => {
-  state.loads = loadsRecords;
-  // Squash all loads GPS points into a single geojson for rendering
+export const loads = action('loads', (nextLoads: LoadsRecord[]) => {
+  state.loads = nextLoads;
   const allFeatures: Feature<Point, LoadsRecordGeoJSONProps>[] = [];
-  for (const load of loadsRecords) {
-    const { geojson, ...rest } = load;
+  for (const loadRecord of nextLoads) {
+    const { geojson, ...rest } = loadRecord;
     for (const feature of geojson.features) {
       allFeatures.push({
         ...feature,
-        properties: rest, // every point gets all the props from the loadsRecord
+        properties: rest,
       });
     }
   }
+
   const geojson: LoadsRecordGeoJSON = {
     type: 'FeatureCollection',
     features: allFeatures,
   };
   geojsonLoads(geojson);
 });
-let _geojsonLoads: FeatureCollection<Point, LoadsRecordGeoJSONProps> = { type : 'FeatureCollection', features: [] };
-export const geojsonLoads = action('geojsonLoads', (glds?: FeatureCollection<Point, LoadsRecordGeoJSONProps>) => {
-  if (glds) {
-    _geojsonLoads = glds;
-    state.geojsonLoads.rev++;
+
+let cachedGeojsonLoads: FeatureCollection<Point, LoadsRecordGeoJSONProps> = { type: 'FeatureCollection', features: [] };
+export const geojsonLoads = action('geojsonLoads', (geojson?: FeatureCollection<Point, LoadsRecordGeoJSONProps>) => {
+  if (geojson) {
+    cachedGeojsonLoads = geojson;
+    state.geojsonLoads.rev += 1;
   }
-  return _geojsonLoads;
+  return cachedGeojsonLoads;
 });
-export const loadLoads = action('loadLoads', async (thisYearSheet: any, lastYearSheet: any) => {
-  const thisYearLoads = thisYearSheet?.loads || {  header: [], data: [] };
-  const lastYearLoads = lastYearSheet?.loads || {  header: [], data: [] };
-  const lds = [ ...thisYearLoads.data,...lastYearLoads.data ];
-  addLineno(lds);
-  stringsToNumbers(lds);
-  assertLoadsRecords(lds);
-  loads(lds);
+
+
+export const retrySessionLoad = action('retrySessionLoad', async (userOverride?: ReturnType<typeof getCurrentUser>) => {
+  info(
+    'Retrying manure session load using %s user reference',
+    typeof userOverride === 'undefined' ? 'current-auth' : 'auth-observer',
+  );
+  try {
+    await loadSessionForUser(typeof userOverride === 'undefined' ? getCurrentUser() : userOverride);
+  } catch (error) {
+    warn('Unexpected failure while retrying manure session load. Error=%O', error);
+    const message = `Unable to retry manure session: ${(error as Error).message}`;
+    resetSessionData();
+    authState({
+      status: 'signed_out',
+      email: '',
+      displayName: '',
+      admin: false,
+      error: message,
+    });
+    loadingError(message);
+    loading(false);
+  }
+});
+export const refreshAccessRecord = action('refreshAccessRecord', async () => {
+  if (!state.auth.email) {
+    info('Skipping manure access refresh because no auth email is currently set');
+    return null;
+  }
+  info('Refreshing manure access record for email=%s', state.auth.email);
+
+  const accessRecord = await getAccessRecord(state.auth.email);
+  if (!isAccessEnabled(accessRecord)) {
+    info('Manure access refresh found no enabled access record for email=%s', state.auth.email);
+    return null;
+  }
+
+  authState({
+    admin: accessRecord.admin,
+    displayName: accessRecord.displayName || state.auth.displayName,
+  });
+  info('Refreshed manure access record for email=%s admin=%s', state.auth.email, accessRecord.admin);
+
+  return accessRecord;
 });
