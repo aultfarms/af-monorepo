@@ -1,0 +1,46 @@
+{
+  "name": "@aultfarms/firebase",
+  "version": "0.0.1",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "description": "Shared browser-focused Firebase helpers for Ault Farms apps",
+  "main": "dist/index.mjs",
+  "type": "module",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build:tsc": "tsc -b",
+    "build:rollup": "rollup --config=rollup.config.js",
+    "build": "yarn build:tsc && yarn build:rollup",
+    "dev:tsc": "tsc -b -w",
+    "dev:rollup": "rollup --config rollup.config.js --watch",
+    "dev": "yarn run build:tsc && concurrently \"yarn run dev:tsc\" \"yarn run dev:rollup\"",
+    "clean": "rm -rf dist"
+  },
+  "author": "Aaron Ault <aultac@gmail.com>",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@rollup/plugin-commonjs": "^24.0.1",
+    "@yarnpkg/sdks": "^3.0.0-rc.42",
+    "concurrently": "^8.0.1",
+    "rollup": "^3.20.2",
+    "rollup-plugin-dts": "^5.3.0",
+    "rollup-plugin-pnp-resolve": "^2.0.0",
+    "terser": "^5.16.8",
+    "typescript": "^5.0.3"
+  },
+  "dependencies": {
+    "@rollup/plugin-node-resolve": "^15.0.1",
+    "@tsconfig/node16": "^1.0.3",
+    "@types/debug": "^4.1.7",
+    "@types/node": "^17.0.14",
+    "debug": "^4.4.0",
+    "firebase": "^11.8.1",
+    "tslib": "^2.5.0"
+  }
+}
