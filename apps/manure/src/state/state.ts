@@ -2,6 +2,7 @@ import { observable } from 'mobx';
 import debug from 'debug';
 import type { LatLngTuple } from 'leaflet';
 import {
+  type AccessRecord,
   assertGPS,
   emptyLoadRecord,
   type Driver,
@@ -18,6 +19,12 @@ export type BigData = {
 };
 
 export type AuthStatus = 'checking' | 'signed_out' | 'signed_in' | 'access_denied';
+export type AccessManagementDraft = {
+  email: string;
+  displayName: string;
+  enabled: boolean;
+  admin: boolean;
+};
 
 export type State = {
   thisYear: number;
@@ -50,6 +57,13 @@ export type State = {
   load: LoadsRecord;
   config: {
     modalOpen: boolean;
+  };
+  accessManagement: {
+    modalOpen: boolean;
+    loading: boolean;
+    saving: boolean;
+    records: AccessRecord[];
+    draft: AccessManagementDraft;
   };
   loadingError: string;
   loading: boolean;
@@ -86,6 +100,15 @@ function assertMapView(value: unknown): asserts value is State['mapView'] {
   if (mapView.zoom > 20) {
     throw new Error('Expected MapView.zoom to be <= 20');
   }
+}
+
+function emptyAccessManagementDraft(): AccessManagementDraft {
+  return {
+    email: '',
+    displayName: '',
+    enabled: true,
+    admin: false,
+  };
 }
 
 const load = emptyLoadRecord();
@@ -148,6 +171,13 @@ export const state = observable<State>({
   load,
   config: {
     modalOpen: false,
+  },
+  accessManagement: {
+    modalOpen: false,
+    loading: false,
+    saving: false,
+    records: [],
+    draft: emptyAccessManagementDraft(),
   },
   loadingError: '',
   loading: true,

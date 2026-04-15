@@ -250,7 +250,10 @@ export const Map = observer(() => {
       zoom={state.mapView.zoom}
       zoomControl={false}
     >
-      <TileLayer url="https://tiles.stadiamaps.com/tiles/alidade_satellite/{z}/{x}/{y}{r}.jpg" />
+      <TileLayer
+        url="https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/tile/{z}/{y}/{x}"
+        attribution="Map services and data available from U.S. Geological Survey, National Geospatial Program."
+      />
 
       {showOperationMap && (
         <GeoJSON
@@ -261,11 +264,11 @@ export const Map = observer(() => {
             const fieldState = operation?.fieldStateByName[fieldName] || null;
             if (!fieldState || fieldState.status === 'ineligible') {
               return {
-                color: '#616161',
-                fillColor: '#9e9e9e',
-                fillOpacity: 0.35,
+                color: '#f5f5f5',
+                fillColor: '#616161',
+                fillOpacity: 0.5,
                 weight: 2,
-                opacity: 0.8,
+                opacity: 0.95,
               };
             }
             if (fieldState.status === 'completed') {

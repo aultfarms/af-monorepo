@@ -2,6 +2,7 @@ import debug from 'debug';
 import { getBrowserFirebase } from '@aultfarms/firebase';
 import {
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocFromCache,
@@ -66,6 +67,10 @@ function metadataCollectionRef(year: number, name: MetadataCollectionName) {
 
 function accessDocRef(email: string) {
   return doc(firestore(), MANURE_ACCESS_COLLECTION, emailKey(email));
+}
+
+function accessCollectionRef() {
+  return collection(firestore(), MANURE_ACCESS_COLLECTION);
 }
 
 function isOfflineFirestoreError(error: unknown): boolean {
@@ -208,6 +213,17 @@ function toLoad(snapshot: QueryDocumentSnapshot<DocumentData>): LoadsRecord {
     id: snapshot.id,
     ...(snapshot.data() as Omit<LoadsRecord, 'id'>),
   };
+}
+
+function toAccessRecord(snapshot: QueryDocumentSnapshot<DocumentData>): AccessRecord {
+  return {
+    email: snapshot.id,
+    ...(snapshot.data() as Omit<AccessRecord, 'email'>),
+  };
+}
+
+function sortAccessRecords(records: AccessRecord[]): AccessRecord[] {
+  return [ ...records ].sort((left, right) => left.email.localeCompare(right.email));
 }
 
 async function ensureYearDocument(year: number): Promise<void> {
@@ -438,6 +454,57 @@ export async function getAccessRecord(email: string): Promise<AccessRecord | nul
     email: snapshot.id,
     ...data,
   };
+}
+
+export async function listAccessRecords(): Promise<AccessRecord[]> {
+  info('Loading manure access records list');
+  const snapshot = await getDocsWithOfflineFallback(
+    accessCollectionRef(),
+    MANURE_ACCESS_COLLECTION,
+    'Unable to load manure access records while offline. Connect once online so they can be cached, then retry.',
+  );
+  const records = sortAccessRecords(snapshot.docs.map(toAccessRecord));
+  info('Loaded manure access records count=%d', records.length);
+  return records;
+}
+
+export async function saveAccessRecord(record: AccessRecord, actorEmail: string): Promise<AccessRecord> {
+  const email = emailKey(record.email);
+  const timestamp = nowIso();
+  const normalizedRecord: AccessRecord = {
+    ...record,
+    email,
+    displayName: record.displayName?.trim() || undefined,
+    createdAt: record.createdAt || timestamp,
+    updatedAt: timestamp,
+    updatedBy: actorEmail,
+  };
+
+  await setDoc(
+    accessDocRef(email),
+    stripUndefined({
+      enabled: normalizedRecord.enabled,
+      admin: normalizedRecord.admin,
+      displayName: normalizedRecord.displayName,
+      createdAt: normalizedRecord.createdAt,
+      updatedAt: normalizedRecord.updatedAt,
+      updatedBy: normalizedRecord.updatedBy,
+    }),
+  );
+  info(
+    'Saved manure access record email=%s enabled=%s admin=%s actor=%s',
+    email,
+    normalizedRecord.enabled,
+    normalizedRecord.admin,
+    actorEmail,
+  );
+  return normalizedRecord;
+}
+
+export async function deleteAccessRecord(email: string): Promise<void> {
+  const normalizedEmail = emailKey(email);
+  await deleteDoc(accessDocRef(normalizedEmail));
+  info('Deleted manure access record email=%s', normalizedEmail);
 }
 
 export function isAccessEnabled(record: AccessRecord | null): record is AccessRecord {
