@@ -66,6 +66,31 @@ function mergeOrAppendLoad(nextLoad: LoadsRecord): LoadsRecord[] {
   return [ ...state.loads, nextLoad ];
 }
 
+function nextBlankAccessDraft(): State['accessManagement']['draft'] {
+  return {
+    email: '',
+    displayName: '',
+    enabled: true,
+    admin: false,
+  };
+}
+
+function sortManagedAccessRecords(records: AccessRecord[]): AccessRecord[] {
+  return [ ...records ].sort((left, right) => left.email.localeCompare(right.email));
+}
+
+function normalizedEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+function isCurrentUserAccessRecord(email: string): boolean {
+  return normalizedEmail(email) === normalizedEmail(state.auth.email);
+}
+
+function findManagedAccessRecord(email: string): AccessRecord | undefined {
+  return state.accessManagement.records.find(record => record.email === normalizedEmail(email));
+}
+
 async function loadSessionForUser(user: ReturnType<typeof getCurrentUser>): Promise<void> {
   if (!user?.email) {
     info('No authenticated Firebase user is available; applying signed-out state');
@@ -123,6 +148,33 @@ export const authState = action('authState', (auth: Partial<State['auth']>) => {
     ...state.auth,
     ...auth,
   };
+});
+
+export const accessManagementState = action('accessManagementState', (accessManagement: Partial<State['accessManagement']>) => {
+  state.accessManagement = {
+    ...state.accessManagement,
+    ...accessManagement,
+  };
+});
+
+export const accessManagementDraft = action('accessManagementDraft', (draft: Partial<State['accessManagement']['draft']>) => {
+  state.accessManagement.draft = {
+    ...state.accessManagement.draft,
+    ...draft,
+  };
+});
+
+export const updateManagedAccessRecord = action('updateManagedAccessRecord', (email: string, patch: Partial<AccessRecord>) => {
+  const targetEmail = normalizedEmail(email);
+  state.accessManagement.records = state.accessManagement.records.map(record =>
+    record.email === targetEmail
+      ? {
+          ...record,
+          ...patch,
+          email: targetEmail,
+        }
+      : record,
+  );
 });
 
 export const online = action('online', (isOnline: boolean) => {
@@ -381,6 +433,16 @@ export const toggleConfigModal = action('toggleConfigModal', () => {
   state.config.modalOpen = !state.config.modalOpen;
 });
 
+export const closeAccessManagementModal = action('closeAccessManagementModal', () => {
+  accessManagementState({
+    modalOpen: false,
+    loading: false,
+    saving: false,
+    records: [],
+    draft: nextBlankAccessDraft(),
+  });
+});
+
 export const snackbarMessage = action('snackbarMessage', (message: string) => {
   state.snackbar.open = true;
   state.snackbar.message = message;
@@ -604,6 +666,143 @@ export const retrySessionLoad = action('retrySessionLoad', async (userOverride?:
     });
     loadingError(message);
     loading(false);
+  }
+});
+
+export const loadAccessManagementRecords = action('loadAccessManagementRecords', async () => {
+  if (!state.auth.admin) {
+    snackbarMessage('Only admins can manage manure access.');
+    return;
+  }
+
+  accessManagementState({ loading: true });
+  try {
+    const records = await listAccessRecords();
+    accessManagementState({ records });
+  } catch (error) {
+    warn('Error loading manure access management records. Error=%O', error);
+    snackbarMessage(`Error loading access records: ${(error as Error).message}`);
+  } finally {
+    accessManagementState({ loading: false });
+  }
+});
+
+export const openAccessManagementModal = action('openAccessManagementModal', async () => {
+  if (!state.auth.admin) {
+    snackbarMessage('Only admins can manage manure access.');
+    return;
+  }
+
+  accessManagementState({
+    modalOpen: true,
+    records: [],
+    draft: nextBlankAccessDraft(),
+  });
+  await loadAccessManagementRecords();
+});
+
+export const createManagedAccessRecord = action('createManagedAccessRecord', async () => {
+  if (!state.auth.admin) {
+    snackbarMessage('Only admins can manage manure access.');
+    return;
+  }
+
+  const email = normalizedEmail(state.accessManagement.draft.email);
+  if (!email || !email.includes('@')) {
+    snackbarMessage('Enter a valid email address.');
+    return;
+  }
+
+  accessManagementState({ saving: true });
+  try {
+    const savedRecord = await persistAccessRecord({
+      email,
+      displayName: state.accessManagement.draft.displayName,
+      enabled: state.accessManagement.draft.enabled,
+      admin: state.accessManagement.draft.admin,
+    }, currentActorEmail());
+    accessManagementState({
+      records: sortManagedAccessRecords([
+        ...state.accessManagement.records.filter(record => record.email !== savedRecord.email),
+        savedRecord,
+      ]),
+      draft: nextBlankAccessDraft(),
+    });
+    snackbarMessage(`Saved access for ${savedRecord.email}`);
+  } catch (error) {
+    warn('Error creating manure access record for email=%s. Error=%O', email, error);
+    snackbarMessage(`Error saving access record: ${(error as Error).message}`);
+  } finally {
+    accessManagementState({ saving: false });
+  }
+});
+
+export const saveManagedAccessRecord = action('saveManagedAccessRecord', async (email: string) => {
+  if (!state.auth.admin) {
+    snackbarMessage('Only admins can manage manure access.');
+    return;
+  }
+
+  const record = findManagedAccessRecord(email);
+  if (!record) {
+    snackbarMessage(`Could not find access record for ${email}.`);
+    return;
+  }
+
+  if (isCurrentUserAccessRecord(record.email) && (!record.enabled || !record.admin)) {
+    snackbarMessage('You cannot remove your own enabled admin access while signed in.');
+    return;
+  }
+
+  accessManagementState({ saving: true });
+  try {
+    const savedRecord = await persistAccessRecord(record, currentActorEmail());
+    accessManagementState({
+      records: sortManagedAccessRecords(
+        state.accessManagement.records.map(existingRecord =>
+          existingRecord.email === savedRecord.email ? savedRecord : existingRecord,
+        ),
+      ),
+    });
+    if (isCurrentUserAccessRecord(savedRecord.email)) {
+      authState({
+        admin: savedRecord.admin,
+        displayName: savedRecord.displayName || state.auth.displayName || state.auth.email,
+      });
+    }
+    snackbarMessage(`Saved access for ${savedRecord.email}`);
+  } catch (error) {
+    warn('Error saving manure access record for email=%s. Error=%O', email, error);
+    snackbarMessage(`Error saving access record: ${(error as Error).message}`);
+  } finally {
+    accessManagementState({ saving: false });
+  }
+});
+
+export const deleteManagedAccessRecord = action('deleteManagedAccessRecord', async (email: string) => {
+  if (!state.auth.admin) {
+    snackbarMessage('Only admins can manage manure access.');
+    return;
+  }
+
+  const targetEmail = normalizedEmail(email);
+  if (isCurrentUserAccessRecord(targetEmail)) {
+    snackbarMessage('You cannot delete your own access while signed in.');
+    return;
+  }
+
+  accessManagementState({ saving: true });
+  try {
+    await removeAccessRecord(targetEmail);
+    accessManagementState({
+      records: state.accessManagement.records.filter(record => record.email !== targetEmail),
+    });
+    snackbarMessage(`Deleted access for ${targetEmail}`);
+  } catch (error) {
+    warn('Error deleting manure access record for email=%s. Error=%O', targetEmail, error);
+    snackbarMessage(`Error deleting access record: ${(error as Error).message}`);
+  } finally {
+    accessManagementState({ saving: false });
   }
 });
 export const refreshAccessRecord = action('refreshAccessRecord', async () => {

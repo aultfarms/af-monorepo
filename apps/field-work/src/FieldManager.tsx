@@ -20,7 +20,20 @@ export const FieldManager = observer(() => {
   });
 
   return (
-    <Box sx={{ p: 2, width: '100%', height: '100%', boxSizing: 'border-box', bgcolor: '#f5f5f5', overflow: 'auto' }}>
+    <Box
+      sx={{
+        p: 2,
+        width: '100%',
+        height: '100%',
+        boxSizing: 'border-box',
+        bgcolor: '#f5f5f5',
+        overflow: 'auto',
+        '@media (orientation: portrait)': {
+          height: 'auto',
+          overflow: 'visible',
+        },
+      }}
+    >
       <Stack direction="row" spacing={1} sx={{ mb: 2, flexWrap: 'wrap', alignItems: 'stretch' }}>
         <Button variant="contained" onClick={actions.addFieldDraft} sx={{ minHeight: 36 }}>
           New Field

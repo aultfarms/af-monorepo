@@ -6,6 +6,7 @@ import { Map } from './Map';
 import { LoadForm } from './LoadForm';
 import { FieldsForm } from './FieldsForm';
 import { ConfigModal } from './ConfigModal';
+import { AccessManagementModal } from './AccessManagementModal';
 import { BottomLoadButton } from './BottomLoadButton';
 import { LoadingIndicator } from './LoadingIndicator';
 import { context } from './state';
@@ -98,6 +99,7 @@ export const App = observer(() => {
       </div>
 
       <ConfigModal />
+      <AccessManagementModal />
       <div style={{ height: '3em' }} />
       <BottomLoadButton />
       <Snackbar

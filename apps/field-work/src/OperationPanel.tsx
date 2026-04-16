@@ -36,6 +36,15 @@ export const OperationPanel = observer(() => {
   const [editorMode, setEditorMode] = React.useState<'create' | 'edit'>('create');
   const [editorName, setEditorName] = React.useState('');
   const [editorCropNames, setEditorCropNames] = React.useState<string[]>([]);
+  const completedFieldStates = operation
+    ? operation.fieldStates
+      .filter(fieldState => fieldState.status === 'completed' && !!fieldState.completion)
+      .sort((left, right) =>
+        (right.completion?.date || '').localeCompare(left.completion?.date || '')
+        || (right.completion?.dateLastActivity || '').localeCompare(left.completion?.dateLastActivity || '')
+        || left.field.name.localeCompare(right.field.name),
+      )
+    : [];
 
   const openCreateEditor = () => {
     setEditorMode('create');
@@ -55,7 +64,20 @@ export const OperationPanel = observer(() => {
   };
 
   return (
-    <Box sx={{ p: 2, width: '100%', height: '100%', boxSizing: 'border-box', bgcolor: '#f5f5f5', overflow: 'auto' }}>
+    <Box
+      sx={{
+        p: 2,
+        width: '100%',
+        height: '100%',
+        boxSizing: 'border-box',
+        bgcolor: '#f5f5f5',
+        overflow: 'auto',
+        '@media (orientation: portrait)': {
+          height: 'auto',
+          overflow: 'visible',
+        },
+      }}
+    >
       <Stack direction="row" spacing={1} sx={{ mb: 2, alignItems: 'flex-start' }}>
         <FormControl fullWidth>
           <InputLabel id="operation-label">Operation</InputLabel>
@@ -151,8 +173,7 @@ export const OperationPanel = observer(() => {
               Completed fields
             </Typography>
             <List dense disablePadding>
-              {operation.fieldStates
-                .filter(fieldState => fieldState.status === 'completed')
+              {completedFieldStates
                 .map(fieldState => (
                   <ListItemButton key={`completed-${fieldState.field.name}`} onClick={() => actions.openFieldModal(fieldState.field.name)}>
                     <ListItemText
@@ -160,6 +181,9 @@ export const OperationPanel = observer(() => {
                       secondaryTypographyProps={{ component: 'div' }}
                       secondary={(
                         <Stack spacing={0.25}>
+                          <Typography variant="body2" color="text.secondary">
+                            {`Completed ${fieldState.completion?.date || ''}`}
+                          </Typography>
                           <Typography variant="body2" color="text.secondary">
                             {`${fieldState.field.acreage.toFixed(2)} ac`}
                           </Typography>
@@ -173,7 +197,7 @@ export const OperationPanel = observer(() => {
                     />
                   </ListItemButton>
                 ))}
-              {operation.completedFieldNames.length < 1 && (
+              {completedFieldStates.length < 1 && (
                 <Typography variant="body2" color="text.secondary">
                   No completed fields yet.
                 </Typography>

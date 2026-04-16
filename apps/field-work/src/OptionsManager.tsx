@@ -10,7 +10,20 @@ export const OptionsManager = observer(() => {
   const operationSelectValue = operation ? state.selectedOperationName : '';
 
   return (
-    <Box sx={{ p: 2, width: '100%', height: '100%', boxSizing: 'border-box', bgcolor: '#f5f5f5', overflow: 'auto' }}>
+    <Box
+      sx={{
+        p: 2,
+        width: '100%',
+        height: '100%',
+        boxSizing: 'border-box',
+        bgcolor: '#f5f5f5',
+        overflow: 'auto',
+        '@media (orientation: portrait)': {
+          height: 'auto',
+          overflow: 'visible',
+        },
+      }}
+    >
       <FormControl fullWidth sx={{ mb: 2 }}>
         <InputLabel id="options-manager-operation-label">Operation</InputLabel>
         <Select

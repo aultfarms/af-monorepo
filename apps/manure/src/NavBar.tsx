@@ -55,6 +55,11 @@ export const NavBar = observer(() => {
           <MenuItem onClick={() => { actions.mode(state.mode === 'loads' ? 'fields' : 'loads'); handleMenuClose(); }}>
             Manage {state.mode === 'loads' ? 'Fields' : 'Loads'}
           </MenuItem>
+          {state.auth.admin && (
+            <MenuItem onClick={() => { void actions.openAccessManagementModal(); handleMenuClose(); }}>
+              Manage Access
+            </MenuItem>
+          )}
           <MenuItem onClick={() => { actions.toggleConfigModal(); handleMenuClose(); }}>
             Config
           </MenuItem>
