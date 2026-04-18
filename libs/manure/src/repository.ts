@@ -30,6 +30,57 @@ function firestore() {
   return getBrowserFirebase().firestore;
 }
 
+function currentAuthSummary() {
+  const user = getBrowserFirebase().auth.currentUser;
+  if (!user) {
+    return null;
+  }
+
+  return {
+    uid: user.uid,
+    email: user.email || '',
+    emailVerified: user.emailVerified,
+    providers: user.providerData.map((provider) => ({
+      providerId: provider.providerId,
+      email: provider.email || '',
+      displayName: provider.displayName || '',
+    })),
+  };
+}
+
+async function logCurrentAuthTokenSummary(context: string): Promise<void> {
+  const user = getBrowserFirebase().auth.currentUser;
+  if (!user) {
+    info('%s - no Firebase Auth currentUser available during manure repository call', context);
+    return;
+  }
+
+  try {
+    const tokenResult = await user.getIdTokenResult();
+    info(
+      '%s - uid=%s email=%s verified=%s tokenEmail=%s tokenEmailVerified=%s signInProvider=%s authTime=%s issuedAt=%s expiration=%s',
+      context,
+      user.uid,
+      user.email || '',
+      user.emailVerified,
+      typeof tokenResult.claims.email === 'string' ? tokenResult.claims.email : '',
+      tokenResult.claims.email_verified === true,
+      tokenResult.signInProvider || '',
+      tokenResult.authTime,
+      tokenResult.issuedAtTime,
+      tokenResult.expirationTime,
+    );
+  } catch (error) {
+    warn(
+      '%s - failed to inspect Firebase token for uid=%s email=%s. Error=%O',
+      context,
+      user.uid,
+      user.email || '',
+      error,
+    );
+  }
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -438,13 +489,32 @@ export async function saveLoadRecord(year: number, load: LoadsRecord, actorEmail
 }
 
 export async function getAccessRecord(email: string): Promise<AccessRecord | null> {
-  info('Loading manure access record for email=%s', emailKey(email));
-  const snapshot = await getDocWithOfflineFallback(
-    accessDocRef(email),
-    'Unable to verify manure access while offline. Connect once online so your allowlist record can be cached, then retry.',
+  const normalizedEmail = emailKey(email);
+  info(
+    'Loading manure access record for requestedEmail=%s currentAuth=%O',
+    normalizedEmail,
+    currentAuthSummary(),
   );
+  await logCurrentAuthTokenSummary(`About to load manure access record requestedEmail=${normalizedEmail}`);
+
+  let snapshot;
+  try {
+    snapshot = await getDocWithOfflineFallback(
+      accessDocRef(email),
+      'Unable to verify manure access while offline. Connect once online so your allowlist record can be cached, then retry.',
+    );
+  } catch (error) {
+    warn(
+      'Loading manure access record failed requestedEmail=%s currentAuth=%O error=%O',
+      normalizedEmail,
+      currentAuthSummary(),
+      error,
+    );
+    await logCurrentAuthTokenSummary(`Failed to load manure access record requestedEmail=${normalizedEmail}`);
+    throw error;
+  }
   if (!snapshot.exists()) {
-    info('No manure access record exists for email=%s', emailKey(email));
+    info('No manure access record exists for email=%s', normalizedEmail);
     return null;
   }
 

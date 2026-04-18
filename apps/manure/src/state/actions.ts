@@ -91,13 +91,69 @@ function findManagedAccessRecord(email: string): AccessRecord | undefined {
   return state.accessManagement.records.find(record => record.email === normalizedEmail(email));
 }
 
+function sessionLoadUserSummary(user: ReturnType<typeof getCurrentUser>) {
+  if (!user) {
+    return null;
+  }
+
+  return {
+    uid: user.uid,
+    email: user.email || '',
+    emailVerified: user.emailVerified,
+    displayName: user.displayName || '',
+    providers: user.providerData.map((provider) => ({
+      providerId: provider.providerId,
+      email: provider.email || '',
+      displayName: provider.displayName || '',
+    })),
+  };
+}
+
+async function logSessionLoadTokenSummary(context: string, user: ReturnType<typeof getCurrentUser>): Promise<void> {
+  if (!user) {
+    info('%s - no Firebase user available for manure session token inspection', context);
+    return;
+  }
+
+  try {
+    const tokenResult = await user.getIdTokenResult();
+    info(
+      '%s - uid=%s email=%s verified=%s tokenEmail=%s tokenEmailVerified=%s signInProvider=%s authTime=%s issuedAt=%s expiration=%s',
+      context,
+      user.uid,
+      user.email || '',
+      user.emailVerified,
+      typeof tokenResult.claims.email === 'string' ? tokenResult.claims.email : '',
+      tokenResult.claims.email_verified === true,
+      tokenResult.signInProvider || '',
+      tokenResult.authTime,
+      tokenResult.issuedAtTime,
+      tokenResult.expirationTime,
+    );
+  } catch (error) {
+    warn(
+      '%s - failed to inspect manure session token for uid=%s email=%s. Error=%O',
+      context,
+      user.uid,
+      user.email || '',
+      error,
+    );
+  }
+}
+
 async function loadSessionForUser(user: ReturnType<typeof getCurrentUser>): Promise<void> {
   if (!user?.email) {
     info('No authenticated Firebase user is available; applying signed-out state');
     applySignedOutUser();
     return;
   }
-  info('Loading manure session for email=%s verified=%s', user.email, user.emailVerified);
+  info(
+    'Loading manure session for user=%O currentAuthUser=%O sameUid=%s',
+    sessionLoadUserSummary(user),
+    sessionLoadUserSummary(getCurrentUser()),
+    user.uid === getCurrentUser()?.uid,
+  );
+  await logSessionLoadTokenSummary('Preparing manure session load token summary', user);
 
   loading(true);
   loadingError('');

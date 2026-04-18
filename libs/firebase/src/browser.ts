@@ -27,6 +27,47 @@ let browserServices: FirebaseBrowserServices | null = null;
 let browserServicesPromise: Promise<FirebaseBrowserServices> | null = null;
 let emulatorsConnected = false;
 
+function providerSummary(user: User | null) {
+  return user?.providerData.map((provider) => ({
+    providerId: provider.providerId,
+    email: provider.email || '',
+    displayName: provider.displayName || '',
+  })) || [];
+}
+
+async function logUserTokenSummary(context: string, user: User | null): Promise<void> {
+  if (!user) {
+    info('%s - no Firebase user available for token inspection', context);
+    return;
+  }
+
+  try {
+    const tokenResult = await user.getIdTokenResult();
+    info(
+      '%s - uid=%s email=%s verified=%s tokenEmail=%s tokenEmailVerified=%s signInProvider=%s providers=%O authTime=%s issuedAt=%s expiration=%s',
+      context,
+      user.uid,
+      user.email || '',
+      user.emailVerified,
+      typeof tokenResult.claims.email === 'string' ? tokenResult.claims.email : '',
+      tokenResult.claims.email_verified === true,
+      tokenResult.signInProvider || '',
+      providerSummary(user),
+      tokenResult.authTime,
+      tokenResult.issuedAtTime,
+      tokenResult.expirationTime,
+    );
+  } catch (error) {
+    warn(
+      '%s - failed to inspect Firebase token for uid=%s email=%s. Error=%O',
+      context,
+      user.uid,
+      user.email || '',
+      error,
+    );
+  }
+}
+
 function browserDebugNamespaces(): string {
   if (typeof window === 'undefined') {
     return '';
@@ -116,6 +157,7 @@ export async function initializeBrowserFirebase(
 
     let firestore;
     let cacheMode: FirebaseBrowserServices['cacheMode'] = 'persistent';
+    const firestoreInitStartedAt = Date.now();
     try {
       // Persistent cache is the default path for manure so offline reloads work.
       firestore = initializeFirestore(app, {
@@ -123,19 +165,40 @@ export async function initializeBrowserFirebase(
           tabManager: persistentMultipleTabManager(),
         }),
       });
-      info('Initialized Firestore with persistent local cache for project=%s', config.projectId);
+      info(
+        'Initialized Firestore with persistent local cache for project=%s durationMs=%d',
+        config.projectId,
+        Date.now() - firestoreInitStartedAt,
+      );
     } catch (_error) {
       cacheMode = 'memory';
       warn('Persistent Firestore cache initialization failed. Falling back to memory cache. Error=%O', _error);
       firestore = initializeFirestore(app, {
         localCache: memoryLocalCache(),
       });
-      info('Initialized Firestore with in-memory cache for project=%s', config.projectId);
+      info(
+        'Initialized Firestore with in-memory cache for project=%s durationMs=%d',
+        config.projectId,
+        Date.now() - firestoreInitStartedAt,
+      );
     }
 
     const auth = getAuth(app);
+    info(
+      'Created Firebase Auth instance for project=%s currentUserPresent=%s',
+      config.projectId,
+      !!auth.currentUser,
+    );
+    await logUserTokenSummary('Firebase Auth initial currentUser token summary', auth.currentUser);
+    const persistenceStartedAt = Date.now();
+    info('Configuring Firebase Auth browserLocalPersistence for project=%s', config.projectId);
     await setPersistence(auth, browserLocalPersistence);
-    info('Configured Firebase Auth browserLocalPersistence for project=%s', config.projectId);
+    info(
+      'Configured Firebase Auth browserLocalPersistence for project=%s durationMs=%d',
+      config.projectId,
+      Date.now() - persistenceStartedAt,
+    );
+    await logUserTokenSummary('Firebase Auth post-persistence currentUser token summary', auth.currentUser);
 
     const services: FirebaseBrowserServices = {
       app,
@@ -178,6 +241,7 @@ export async function signInWithGoogle(): Promise<User> {
       result.user.email || '',
       result.user.emailVerified,
     );
+    await logUserTokenSummary('Google sign-in completed token summary', result.user);
     return result.user;
   } catch (error) {
     warn('Google sign-in popup flow failed. Error=%O', error);
@@ -209,6 +273,7 @@ export function observeAuthState(listener: (user: User | null) => void): () => v
         user?.emailVerified || false,
         user?.isAnonymous || false,
       );
+      void logUserTokenSummary('Firebase auth state change token summary', user);
       listener(user);
     },
     (error) => {

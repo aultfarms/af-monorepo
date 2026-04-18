@@ -36,12 +36,27 @@ export const initialize = async () => {
   });
 
   try {
-    const services = await initializeBrowserFirebase(firebaseConfig);
+    const firebaseInitStartedAt = Date.now();
     info(
-      'Firebase initialized for project=%s authDomain=%s cacheMode=%s',
+      'Calling initializeBrowserFirebase for project=%s authDomain=%s',
+      firebaseConfig.projectId,
+      firebaseConfig.authDomain,
+    );
+    const firebaseInitWatchdog = window.setTimeout(() => {
+      warn(
+        'initializeBrowserFirebase is still pending after 5s for project=%s authDomain=%s',
+        firebaseConfig.projectId,
+        firebaseConfig.authDomain,
+      );
+    }, 5000);
+    const services = await initializeBrowserFirebase(firebaseConfig);
+    window.clearTimeout(firebaseInitWatchdog);
+    info(
+      'Firebase initialized for project=%s authDomain=%s cacheMode=%s durationMs=%d',
       services.config.projectId,
       services.config.authDomain,
       services.cacheMode,
+      Date.now() - firebaseInitStartedAt,
     );
     actions.authState({
       cacheMode: services.cacheMode,
