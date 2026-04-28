@@ -1,7 +1,7 @@
 import React from 'react';
 import { observer } from 'mobx-react-lite';
 import { context } from './state';
-import { Box, Table, TableBody, TableCell, TableHead, TableRow, TextField, Button, IconButton } from '@mui/material';
+import { Box, Table, TableBody, TableCell, TableHead, TableRow, TextField, Button, IconButton, Typography } from '@mui/material';
 import GpsFixedIcon from '@mui/icons-material/GpsFixed';
 import { useDropzone } from 'react-dropzone';
 
@@ -35,16 +35,21 @@ export const FieldsForm = observer(() => {
       { state.fieldsChanged &&
         <div style={{ display: 'flex', flexDirection: 'row', width: '100%' }}>
           <Button variant="contained" color="secondary"
-            onClick={actions.saveFields} style={{ margin: '5px', width: '100%' }}
+            onClick={() => void actions.saveFields()} style={{ margin: '5px', width: '100%' }}
           >
             Save Fields
           </Button>
         </div>
       }
+      <Typography variant="body2" color="text.secondary" sx={{ px: 1, pb: 1 }}>
+        Default heading degrees are used as the starting row direction when drawing a load for that field.
+      </Typography>
       <Table>
         <TableHead>
           <TableRow>
-            <TableCell width="85%">Name</TableCell>
+            <TableCell width="45%">Name</TableCell>
+            <TableCell width="20%">Acres</TableCell>
+            <TableCell width="25%">Default heading°</TableCell>
             <TableCell>Actions</TableCell>
           </TableRow>
         </TableHead>
@@ -60,6 +65,25 @@ export const FieldsForm = observer(() => {
                     onChange={(e) => editMode && actions.fieldName(field.name, e.target.value)}
                   />
                 }
+              </TableCell>
+              <TableCell>{field.acreage.toFixed(2)}</TableCell>
+              <TableCell>
+                {!editMode
+                  ? (typeof field.defaultHeadingDegrees === 'number' ? field.defaultHeadingDegrees : '')
+                  : (
+                    <TextField
+                      style={{ width: '100%' }}
+                      type="number"
+                      value={field.defaultHeadingDegrees ?? ''}
+                      onChange={(event) => {
+                        const value = event.target.value.trim();
+                        actions.fieldDefaultHeadingDegrees(
+                          field.name,
+                          value === '' ? undefined : Number.parseFloat(value),
+                        );
+                      }}
+                    />
+                  )}
               </TableCell>
               <TableCell>
                 <IconButton onClick={() => actions.moveMapToField(field.name)}>

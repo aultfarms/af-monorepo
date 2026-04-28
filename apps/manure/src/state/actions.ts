@@ -1,5 +1,6 @@
 import { action, runInAction } from 'mobx';
 import {
+  createLoadGroupKey,
   assertDrivers,
   assertFields,
   assertLoadsRecords,
@@ -60,6 +61,10 @@ function refreshStoredLoadRecord(): void {
 
 function currentActorEmail(): string {
   return state.auth.email || 'unknown@local';
+}
+
+function makeClientId(prefix: string): string {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function drawHeadingStorageKey(fieldName: string): string {
@@ -196,10 +201,10 @@ function validateManagedSources(sourcesList: Source[]): string | null {
       return `Source "${name}" must have a valid acres-per-load value.`;
     }
     if (!Number.isFinite(source.spreadWidthFeet) || (source.spreadWidthFeet || 0) <= 0) {
-      return `Source \"${name}\" must have a valid spread width in feet.`;
+      return `Source "${name}" must have a valid spread width in feet.`;
     }
     if (!Number.isFinite(source.defaultLoadLengthFeet) || (source.defaultLoadLengthFeet || 0) <= 0) {
-      return `Source \"${name}\" must have a valid default load length in feet.`;
+      return `Source "${name}" must have a valid default load length in feet.`;
     }
   }
   return null;
@@ -227,6 +232,11 @@ function isCurrentUserAccessRecord(email: string): boolean {
 
 function findManagedAccessRecord(email: string): AccessRecord | undefined {
   return state.accessManagement.records.find(record => record.email === normalizedEmail(email));
+}
+
+function fieldDefaultHeading(fieldName: string): number | null {
+  const field = state.fields.find(candidate => candidate.name === fieldName);
+  return typeof field?.defaultHeadingDegrees === 'number' ? field.defaultHeadingDegrees : null;
 }
 
 function sessionLoadUserSummary(user: ReturnType<typeof getCurrentUser>) {
@@ -344,6 +354,183 @@ export const authState = action('authState', (auth: Partial<State['auth']>) => {
   };
 });
 
+export const toggleHistoryLoadGroupSelection = action('toggleHistoryLoadGroupSelection', (loadGroupKey: string) => {
+  const selected = new Set(state.historyManagement.selectedLoadGroupKeys);
+  if (selected.has(loadGroupKey)) {
+    selected.delete(loadGroupKey);
+  } else {
+    selected.add(loadGroupKey);
+  }
+
+  historyManagementState({
+    selectedLoadGroupKeys: [ ...selected ],
+  });
+});
+
+export const clearHistoryLoadGroupSelection = action('clearHistoryLoadGroupSelection', () => {
+  historyManagementState({
+    selectedLoadGroupKeys: [],
+  });
+});
+
+export const setDrawEnabled = action('setDrawEnabled', (enabled: boolean) => {
+  drawState({ enabled });
+});
+
+export const openDrawModalForLoadGroups = action(
+  'openDrawModalForLoadGroups',
+  (
+    loadGroupKeys: string[],
+    preferredMode?: SpreadRegion['mode'],
+    preferredLoadCounts?: Record<string, number>,
+  ) => {
+    const groupsByKey = summarizeLoadGroupsByKey(state.loads, state.regionAssignments, state.thisYear);
+    const selectedGroups = loadGroupKeys
+      .map(loadGroupKey => groupsByKey.get(loadGroupKey))
+      .filter((group): group is NonNullable<typeof group> => !!group);
+
+    if (selectedGroups.length < 1) {
+      snackbarMessage('No matching grouped loads were found to draw.');
+      return;
+    }
+
+    const fieldNames = [ ...new Set(selectedGroups.map(group => group.field)) ];
+    if (fieldNames.length !== 1) {
+      snackbarMessage('Select grouped loads from the same field before drawing one region.');
+      return;
+    }
+
+    const targetField = fieldNames[0] || '';
+    const assignmentLoadCounts = Object.fromEntries(selectedGroups.map(group => [
+      group.loadGroupKey,
+      Math.max(
+        0,
+        Math.min(
+          group.totalLoads,
+          preferredLoadCounts?.[group.loadGroupKey]
+            ?? (group.unassignedLoads > 0 ? group.unassignedLoads : group.totalLoads),
+        ),
+      ),
+    ]));
+    const defaultHeading = storedFieldHeading(targetField) ?? fieldDefaultHeading(targetField);
+    drawState({
+      modalOpen: true,
+      saving: false,
+      mode: preferredMode || (selectedGroups.length > 1 ? 'polygon' : 'load'),
+      targetLoadGroupKeys: selectedGroups.map(group => group.loadGroupKey),
+      assignmentLoadCounts,
+      targetField,
+      headingDegrees: defaultHeading,
+      useDefaultFieldHeading: storedFieldHeading(targetField) === null,
+    });
+  },
+);
+
+export const openDrawModalForCurrentLoad = action('openDrawModalForCurrentLoad', () => {
+  if (!state.load.date || !state.load.field || !state.load.source) {
+    snackbarMessage('Select a date, field, and source before drawing.');
+    return;
+  }
+  openDrawModalForLoadGroups([ createLoadGroupKey(state.load) ], 'load');
+});
+
+export const closeDrawModal = action('closeDrawModal', () => {
+  drawState({
+    modalOpen: false,
+    saving: false,
+    targetLoadGroupKeys: [],
+    assignmentLoadCounts: {},
+    targetField: '',
+    mode: 'load',
+  });
+});
+
+export const setDrawHeadingDegrees = action('setDrawHeadingDegrees', (headingDegrees: number | null) => {
+  drawState({
+    headingDegrees,
+    useDefaultFieldHeading: false,
+  });
+  if (state.draw.targetField) {
+    persistFieldHeading(state.draw.targetField, headingDegrees);
+  }
+});
+
+export const setDrawAssignmentLoadCount = action(
+  'setDrawAssignmentLoadCount',
+  (loadGroupKey: string, nextLoadCount: number) => {
+    drawState({
+      assignmentLoadCounts: {
+        ...state.draw.assignmentLoadCounts,
+        [loadGroupKey]: nextLoadCount,
+      },
+    });
+  },
+);
+
+export const saveDrawRegion = action('saveDrawRegion', async (
+  regionDraft: Omit<SpreadRegion, 'createdAt' | 'updatedAt' | 'updatedBy'>,
+  assignmentDrafts: Array<Omit<SpreadRegionAssignment, 'id' | 'regionId' | 'createdAt' | 'updatedAt' | 'updatedBy'>>,
+) => {
+  if (!regionDraft.field) {
+    snackbarMessage('Choose a field before saving a drawn region.');
+    return;
+  }
+  if (assignmentDrafts.length < 1) {
+    snackbarMessage('Select at least one grouped load to associate with the region.');
+    return;
+  }
+
+  drawState({ saving: true });
+  try {
+    const regionId = regionDraft.id || makeClientId('region');
+    const regionToSave: SpreadRegion = {
+      ...regionDraft,
+      id: regionId,
+    };
+    const nextRegions = state.regions.filter(region => region.id !== regionId);
+    const savedRegions = await persistSpreadRegions(
+      state.thisYear,
+      [ ...nextRegions, regionToSave ],
+      currentActorEmail(),
+    );
+
+    const assignmentsToSave: SpreadRegionAssignment[] = assignmentDrafts.map(assignment => ({
+      ...assignment,
+      regionId,
+    }));
+    const nextAssignments = state.regionAssignments.filter(assignment => assignment.regionId !== regionId);
+    const savedAssignments = await persistSpreadRegionAssignments(
+      state.thisYear,
+      [ ...nextAssignments, ...assignmentsToSave ],
+      currentActorEmail(),
+    );
+
+    regions(savedRegions);
+    regionAssignments(savedAssignments);
+    historyManagementState({ selectedLoadGroupKeys: [] });
+    closeDrawModal();
+    snackbarMessage('Spread region saved');
+  } catch (error) {
+    warn('Error saving manure spread region. Error=%O', error);
+    snackbarMessage(`Error saving spread region: ${(error as Error).message}`);
+  } finally {
+    drawState({ saving: false });
+  }
+});
+
+export const revertDrawHeadingToFieldDefault = action('revertDrawHeadingToFieldDefault', () => {
+  if (!state.draw.targetField) {
+    return;
+  }
+
+  const headingDegrees = fieldDefaultHeading(state.draw.targetField);
+  persistFieldHeading(state.draw.targetField, null);
+  drawState({
+    headingDegrees,
+    useDefaultFieldHeading: true,
+  });
+});
+
 export const accessManagementState = action('accessManagementState', (accessManagement: Partial<State['accessManagement']>) => {
   state.accessManagement = {
     ...state.accessManagement,
@@ -453,6 +640,7 @@ export const resetSessionData = action('resetSessionData', () => {
     saving: false,
     mode: 'load',
     targetLoadGroupKeys: [],
+    assignmentLoadCounts: {},
     targetField: '',
     headingDegrees: null,
     useDefaultFieldHeading: true,
@@ -555,21 +743,28 @@ export const loadAllData = action('loadAllData', async () => {
     assertDrivers(data.drivers);
     assertLoadsRecords(data.loads);
     assertLoadsRecords(data.previousLoads);
+    assertSpreadRegions(data.regions);
+    assertSpreadRegionAssignments(data.regionAssignments);
 
     fields(data.fields);
     sources(data.sources);
     drivers(data.drivers);
-    loads([ ...data.loads, ...data.previousLoads ]);
+    loads(data.loads);
+    previousLoads(data.previousLoads);
+    regions(data.regions);
+    regionAssignments(data.regionAssignments);
     fieldsChanged(false);
     load({});
     info(
-      'Loaded manure app data for year=%d fields=%d sources=%d drivers=%d loads=%d previousLoads=%d',
+      'Loaded manure app data for year=%d fields=%d sources=%d drivers=%d loads=%d previousLoads=%d regions=%d assignments=%d',
       state.thisYear,
       data.fields.length,
       data.sources.length,
       data.drivers.length,
       data.loads.length,
       data.previousLoads.length,
+      data.regions.length,
+      data.regionAssignments.length,
     );
   } catch (error) {
     warn('Error loading manure app data for year=%d. Error=%O', state.thisYear, error);
@@ -668,11 +863,23 @@ export const fieldBoundary = action('fieldBoundary', (name: string, boundary: Fi
   }
 });
 
+export const fieldDefaultHeadingDegrees = action('fieldDefaultHeadingDegrees', (name: string, value: number | undefined) => {
+  const fieldIndex = state.fields.findIndex(field => field.name === name);
+  if (fieldIndex < 0) {
+    info('Could not find field with name %s for default heading update', name);
+    return;
+  }
+
+  fieldsChanged(true);
+  state.fields[fieldIndex]!.defaultHeadingDegrees = value;
+});
+
 export const plusLoad = action('plusLoad', async () => {
   if (!state.load.date || !state.load.field || !state.load.source || !state.load.driver) {
     snackbarMessage('Cannot record load without a date, field, source, and driver');
     return;
   }
+  let nextLoad: LoadsRecord | null = null;
 
   runInAction(() => {
     state.load.loads += 1;
@@ -680,13 +887,20 @@ export const plusLoad = action('plusLoad', async () => {
       ...state.load.geojson,
       features: [ ...state.load.geojson.features, createLoadPoint(state.currentGPS) ],
     };
+    nextLoad = { ...state.load };
   });
 
-  await saveLoad();
+  const savedLoad = await saveLoad(nextLoad);
+  if (savedLoad && state.draw.enabled) {
+    const loadGroupKey = createLoadGroupKey(savedLoad);
+    openDrawModalForLoadGroups([ loadGroupKey ], 'load', {
+      [loadGroupKey]: 1,
+    });
+  }
 });
 
-export const saveLoad = action('saveLoad', async () => {
-  const currentLoad = state.load;
+export const saveLoad = action('saveLoad', async (loadToSave?: LoadsRecord | null) => {
+  const currentLoad = loadToSave || state.load;
   if (!currentLoad.date || !currentLoad.field || !currentLoad.source || !currentLoad.driver) {
     snackbarMessage('Cannot record load without a date, field, source, and driver');
     return;
@@ -696,6 +910,7 @@ export const saveLoad = action('saveLoad', async () => {
     const savedLoad = await saveLoadRecord(state.thisYear, currentLoad, currentActorEmail());
     loads(mergeOrAppendLoad(savedLoad));
     load(savedLoad);
+    return savedLoad;
   } catch (error) {
     loadingError(`Error saving load: ${(error as Error).message}`);
   }
@@ -1017,11 +1232,17 @@ export const openAccessManagementModal = action('openAccessManagementModal', asy
 });
 
 export const openHistoryModal = action('openHistoryModal', () => {
-  historyManagementState({ modalOpen: true });
+  historyManagementState({
+    modalOpen: true,
+    selectedLoadGroupKeys: [],
+  });
 });
 
 export const closeHistoryModal = action('closeHistoryModal', () => {
-  historyManagementState({ modalOpen: false });
+  historyManagementState({
+    modalOpen: false,
+    selectedLoadGroupKeys: [],
+  });
 });
 
 export const openSourceManagementModal = action('openSourceManagementModal', () => {
@@ -1089,10 +1310,14 @@ export const addManagedSource = action('addManagedSource', () => {
   }
 
   const acPerLoad = Number.parseFloat(state.lookupManagement.sourceDraft.acPerLoad);
+  const spreadWidthFeet = Number.parseFloat(state.lookupManagement.sourceDraft.spreadWidthFeet);
+  const defaultLoadLengthFeet = Number.parseFloat(state.lookupManagement.sourceDraft.defaultLoadLengthFeet);
   const nextSource: Source = {
     name: state.lookupManagement.sourceDraft.name.trim(),
     type: state.lookupManagement.sourceDraft.type,
     acPerLoad,
+    spreadWidthFeet,
+    defaultLoadLengthFeet,
   };
   const validationError = validateManagedSources([ ...state.lookupManagement.sources, nextSource ]);
   if (validationError) {

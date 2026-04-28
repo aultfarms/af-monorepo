@@ -43,6 +43,7 @@ export type DrawManagementState = {
   saving: boolean;
   mode: SpreadRegion['mode'];
   targetLoadGroupKeys: string[];
+  assignmentLoadCounts: Record<string, number>;
   targetField: string;
   headingDegrees: number | null;
   useDefaultFieldHeading: boolean;
@@ -171,6 +172,7 @@ function emptyDrawManagementState(): DrawManagementState {
     saving: false,
     mode: 'load',
     targetLoadGroupKeys: [],
+    assignmentLoadCounts: {},
     targetField: '',
     headingDegrees: null,
     useDefaultFieldHeading: true,
