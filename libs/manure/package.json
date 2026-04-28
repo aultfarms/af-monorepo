@@ -38,6 +38,7 @@
     "@aultfarms/firebase": "workspace:^",
     "@rollup/plugin-node-resolve": "^15.0.1",
     "@tsconfig/node16": "^1.0.3",
+    "@turf/area": "^7.2.0",
     "@types/debug": "^4.1.7",
     "@types/geojson": "^7946.0.16",
     "@types/node": "^17.0.14",

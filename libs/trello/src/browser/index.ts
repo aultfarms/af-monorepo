@@ -74,7 +74,7 @@ async function authorize(): Promise<void> {
   const newhref = 'https://api.trello.com/1/authorize'
     + '?return_url='+return_url
     + '&callback_method=fragment'
-    + '&scope=read,write'
+    + '&scope=read,write,account'
     + '&expiration=never'
     + '&name=Ault%20Farms%20Apps'
     + '&key='+devKey

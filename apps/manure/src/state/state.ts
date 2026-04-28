@@ -9,6 +9,8 @@ import {
   type Field,
   type LoadsRecord,
   type Source,
+  type SpreadRegion,
+  type SpreadRegionAssignment,
 } from '@aultfarms/manure';
 import type { FirebaseCacheMode } from '@aultfarms/firebase';
 
@@ -24,6 +26,26 @@ export type AccessManagementDraft = {
   displayName: string;
   enabled: boolean;
   admin: boolean;
+};
+export type SourceManagementDraft = {
+  name: string;
+  type: Source['type'];
+  acPerLoad: string;
+  spreadWidthFeet: string;
+  defaultLoadLengthFeet: string;
+};
+export type DriverManagementDraft = {
+  name: string;
+};
+export type DrawManagementState = {
+  enabled: boolean;
+  modalOpen: boolean;
+  saving: boolean;
+  mode: SpreadRegion['mode'];
+  targetLoadGroupKeys: string[];
+  targetField: string;
+  headingDegrees: number | null;
+  useDefaultFieldHeading: boolean;
 };
 
 export type State = {
@@ -49,21 +71,36 @@ export type State = {
   editingField: string;
   fieldsChanged: boolean;
   loads: LoadsRecord[];
+  previousLoads: LoadsRecord[];
   fields: Field[];
   sources: Source[];
   drivers: Driver[];
+  regions: SpreadRegion[];
+  regionAssignments: SpreadRegionAssignment[];
   geojsonFields: BigData;
   geojsonLoads: BigData;
+  geojsonRegions: BigData;
   load: LoadsRecord;
-  config: {
-    modalOpen: boolean;
-  };
   accessManagement: {
     modalOpen: boolean;
     loading: boolean;
     saving: boolean;
     records: AccessRecord[];
     draft: AccessManagementDraft;
+  };
+  historyManagement: {
+    modalOpen: boolean;
+    selectedLoadGroupKeys: string[];
+  };
+  draw: DrawManagementState;
+  lookupManagement: {
+    sourceModalOpen: boolean;
+    driverModalOpen: boolean;
+    saving: boolean;
+    sources: Source[];
+    drivers: Driver[];
+    sourceDraft: SourceManagementDraft;
+    driverDraft: DriverManagementDraft;
   };
   loadingError: string;
   loading: boolean;
@@ -111,13 +148,41 @@ function emptyAccessManagementDraft(): AccessManagementDraft {
   };
 }
 
+function emptySourceManagementDraft(): SourceManagementDraft {
+  return {
+    name: '',
+    type: 'solid',
+    acPerLoad: '',
+    spreadWidthFeet: '40',
+    defaultLoadLengthFeet: '500',
+  };
+}
+
+function emptyDriverManagementDraft(): DriverManagementDraft {
+  return {
+    name: '',
+  };
+}
+
+function emptyDrawManagementState(): DrawManagementState {
+  return {
+    enabled: false,
+    modalOpen: false,
+    saving: false,
+    mode: 'load',
+    targetLoadGroupKeys: [],
+    targetField: '',
+    headingDegrees: null,
+    useDefaultFieldHeading: true,
+  };
+}
+
 const load = emptyLoadRecord();
 try {
   const localLoad = JSON.parse(localStorage.getItem('af.manure.loadRecord') || '{}') as Partial<LoadsRecord>;
   if (typeof localLoad.field === 'string') load.field = localLoad.field;
   if (typeof localLoad.source === 'string') load.source = localLoad.source;
   if (typeof localLoad.driver === 'string') load.driver = localLoad.driver;
-  if (typeof localLoad.date === 'string') load.date = localLoad.date;
 } catch (_error) {
   info('No valid previous record found in localStorage, using default');
 }
@@ -163,21 +228,36 @@ export const state = observable<State>({
   editingField: '',
   fieldsChanged: false,
   loads: [],
+  previousLoads: [],
   fields: [],
   sources: [],
   drivers: [],
+  regions: [],
+  regionAssignments: [],
   geojsonFields: { rev: 0 },
   geojsonLoads: { rev: 0 },
+  geojsonRegions: { rev: 0 },
   load,
-  config: {
-    modalOpen: false,
-  },
   accessManagement: {
     modalOpen: false,
     loading: false,
     saving: false,
     records: [],
     draft: emptyAccessManagementDraft(),
+  },
+  historyManagement: {
+    modalOpen: false,
+    selectedLoadGroupKeys: [],
+  },
+  draw: emptyDrawManagementState(),
+  lookupManagement: {
+    sourceModalOpen: false,
+    driverModalOpen: false,
+    saving: false,
+    sources: [],
+    drivers: [],
+    sourceDraft: emptySourceManagementDraft(),
+    driverDraft: emptyDriverManagementDraft(),
   },
   loadingError: '',
   loading: true,

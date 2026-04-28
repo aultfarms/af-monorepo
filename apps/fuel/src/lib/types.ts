@@ -20,6 +20,13 @@ export type FuelSettingsPumpRow = {
   id: string;
   name: string;
 };
+export type FuelDriveExportFile = {
+  id: string;
+  name: string;
+  year: number;
+  month: number;
+  monthKey: string;
+};
 
 export type FuelSettings = {
   spreadsheetId: string;
@@ -50,6 +57,7 @@ export type FuelTransaction = {
   sourceFile: string;
   rawLineNumber: number;
 };
+export type LoadedExportSource = 'manual-zip' | 'google-drive';
 
 export type LoadedExportSummary = {
   fileName: string;
@@ -57,6 +65,10 @@ export type LoadedExportSummary = {
   transactionCount: number;
   minDateText: string;
   maxDateText: string;
+  sourceFiles: string[];
+  source: LoadedExportSource;
+  sourceLabel: string;
+  requestedMonthKey?: string;
 };
 
 export type FuelReportEntry = {

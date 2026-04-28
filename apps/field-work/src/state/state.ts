@@ -1,5 +1,5 @@
 import { observable } from 'mobx';
-import type { LatLngTuple } from 'leaflet';
+import type { LatLngBoundsLiteral, LatLngTuple } from 'leaflet';
 import type { CompletionValues, FieldBoundary, FieldWorkBoard } from '@aultfarms/field-work';
 
 export type EditableField = {
@@ -25,6 +25,41 @@ export type EditableOption = {
   description: string;
 };
 
+export type TrelloDiagnosticUser = {
+  id: string;
+  username: string;
+  fullName: string;
+  email: string;
+  url: string;
+};
+
+export type TrelloDiagnosticOrg = {
+  id: string;
+  name: string;
+  displayName: string;
+};
+
+export type TrelloDiagnosticBoard = {
+  id: string;
+  name: string;
+  closed: boolean;
+  url: string;
+};
+
+export type TrelloDiagnostics = {
+  loading: boolean;
+  error: string;
+  tokenStorageKey: string;
+  tokenPresent: boolean;
+  expectedOrgName: string;
+  expectedBoardName: string;
+  user: TrelloDiagnosticUser | null;
+  organizations: TrelloDiagnosticOrg[];
+  defaultOrganizationFound: boolean;
+  defaultOrganizationId: string;
+  boardsInDefaultOrganization: TrelloDiagnosticBoard[];
+};
+
 export type FieldModalAction = 'complete' | 'uncomplete' | 'include' | 'exclude' | 'remove_exclude' | '';
 export type AppIssue = {
   key: string;
@@ -38,12 +73,19 @@ export type State = {
   loading: boolean;
   loadingError: string;
   trelloAuthorized: boolean;
+  authScreenOpen: boolean;
   board: FieldWorkBoard | null;
   mode: 'operations' | 'field_manager' | 'crops_manager' | 'options_manager';
   mapView: {
     center: LatLngTuple;
     zoom: number;
   };
+  mapBounds: LatLngBoundsLiteral | null;
+  mapCommandId: number;
+  currentLocation: {
+    center: LatLngTuple;
+    accuracyMeters: number;
+  } | null;
   selectedOperationName: string;
   selectedManagerFieldName: string;
   selectedCropName: string;
@@ -57,6 +99,7 @@ export type State = {
     open: boolean;
     message: string;
   };
+  trelloDiagnostics: TrelloDiagnostics;
   issuesModalOpen: boolean;
   issues: AppIssue[];
   fieldModal: {
@@ -114,9 +157,13 @@ export const state = observable<State>({
   loading: true,
   loadingError: '',
   trelloAuthorized: false,
+  authScreenOpen: false,
   board: null,
   mode: 'operations',
   mapView: storedMapView,
+  mapBounds: null,
+  mapCommandId: 0,
+  currentLocation: null,
   selectedOperationName: storedOperationName,
   selectedManagerFieldName: '',
   selectedCropName: '',
@@ -129,6 +176,19 @@ export const state = observable<State>({
   snackbar: {
     open: false,
     message: '',
+  },
+  trelloDiagnostics: {
+    loading: false,
+    error: '',
+    tokenStorageKey: 'trello_token',
+    tokenPresent: false,
+    expectedOrgName: '',
+    expectedBoardName: '',
+    user: null,
+    organizations: [],
+    defaultOrganizationFound: false,
+    defaultOrganizationId: '',
+    boardsInDefaultOrganization: [],
   },
   issuesModalOpen: false,
   issues: [],

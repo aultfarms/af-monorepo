@@ -15,7 +15,18 @@ import {
   type Query,
   type QueryDocumentSnapshot,
 } from 'firebase/firestore';
-import type { AccessRecord, Driver, Field, LoadsRecord, ManureAppData, Source } from './types.js';
+import {
+  createLoadGroupKey,
+  nominalFieldAcreage,
+  type AccessRecord,
+  type Driver,
+  type Field,
+  type LoadsRecord,
+  type ManureAppData,
+  type Source,
+  type SpreadRegion,
+  type SpreadRegionAssignment,
+} from './types.js';
 
 const info = debug('af/manure-lib:info');
 const warn = debug('af/manure-lib:warn');
@@ -23,8 +34,20 @@ const warn = debug('af/manure-lib:warn');
 const MANURE_YEARS_COLLECTION = 'manureYears';
 const MANURE_ACCESS_COLLECTION = 'manureAccess';
 const METADATA_COLLECTIONS = [ 'fields', 'sources', 'drivers' ] as const;
+const SPREAD_REGIONS_COLLECTION = 'regions';
+const SPREAD_REGION_ASSIGNMENTS_COLLECTION = 'regionAssignments';
+const DEFAULT_SOURCE_SPREAD_WIDTH_FEET = 40;
+const DEFAULT_SOURCE_LOAD_LENGTH_FEET = 500;
+const CURRENT_MANURE_SCHEMA_VERSION = 2;
 
 type MetadataCollectionName = typeof METADATA_COLLECTIONS[number];
+type StoredFieldDocument = Omit<Field, 'id' | 'boundary'> & {
+  boundary: string | Field['boundary'];
+};
+type StoredSpreadRegionDocument = Omit<SpreadRegion, 'id' | 'polygon' | 'centerline'> & {
+  polygon: string | SpreadRegion['polygon'];
+  centerline?: string | SpreadRegion['centerline'];
+};
 
 function firestore() {
   return getBrowserFirebase().firestore;
@@ -104,6 +127,147 @@ function stripUndefined<T extends Record<string, unknown>>(value: T): T {
   ) as T;
 }
 
+function isFieldBoundary(value: unknown): value is Field['boundary'] {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const boundary = value as Field['boundary'];
+  if (boundary.type !== 'Feature') {
+    return false;
+  }
+
+  if (!boundary.geometry || typeof boundary.geometry !== 'object') {
+    return false;
+  }
+
+  return boundary.geometry.type === 'Polygon' || boundary.geometry.type === 'MultiPolygon';
+}
+
+function normalizeFieldBoundary(boundary: Field['boundary']): Field['boundary'] {
+  return {
+    type: 'Feature',
+    properties: null,
+    geometry: boundary.geometry,
+  };
+}
+
+function serializeFieldBoundary(boundary: Field['boundary']): string {
+  return JSON.stringify(normalizeFieldBoundary(boundary));
+}
+
+function parseFieldBoundary(value: unknown, path: string): Field['boundary'] {
+  let parsedValue = value;
+
+  if (typeof value === 'string') {
+    try {
+      parsedValue = JSON.parse(value);
+    } catch (error) {
+      throw new Error(`Field boundary at ${path} is not valid JSON: ${(error as Error).message}`);
+    }
+  }
+
+  if (!isFieldBoundary(parsedValue)) {
+    throw new Error(`Field boundary at ${path} is not valid GeoJSON`);
+  }
+
+  return normalizeFieldBoundary(parsedValue);
+}
+
+function isPolygonFeature(value: unknown): value is SpreadRegion['polygon'] {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const feature = value as SpreadRegion['polygon'];
+  if (feature.type !== 'Feature') {
+    return false;
+  }
+
+  if (!feature.geometry || typeof feature.geometry !== 'object') {
+    return false;
+  }
+
+  return feature.geometry.type === 'Polygon' || feature.geometry.type === 'MultiPolygon';
+}
+
+function normalizePolygonFeature(feature: SpreadRegion['polygon']): SpreadRegion['polygon'] {
+  return {
+    type: 'Feature',
+    properties: null,
+    geometry: feature.geometry,
+  };
+}
+
+function serializePolygonFeature(feature: SpreadRegion['polygon']): string {
+  return JSON.stringify(normalizePolygonFeature(feature));
+}
+
+function parsePolygonFeature(value: unknown, path: string): SpreadRegion['polygon'] {
+  let parsedValue = value;
+
+  if (typeof value === 'string') {
+    try {
+      parsedValue = JSON.parse(value);
+    } catch (error) {
+      throw new Error(`Polygon feature at ${path} is not valid JSON: ${(error as Error).message}`);
+    }
+  }
+
+  if (!isPolygonFeature(parsedValue)) {
+    throw new Error(`Polygon feature at ${path} is not valid GeoJSON`);
+  }
+
+  return normalizePolygonFeature(parsedValue);
+}
+
+function isLineFeature(value: unknown): value is NonNullable<SpreadRegion['centerline']> {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const feature = value as NonNullable<SpreadRegion['centerline']>;
+  if (feature.type !== 'Feature') {
+    return false;
+  }
+
+  if (!feature.geometry || typeof feature.geometry !== 'object') {
+    return false;
+  }
+
+  return feature.geometry.type === 'LineString';
+}
+
+function normalizeLineFeature(feature: NonNullable<SpreadRegion['centerline']>): NonNullable<SpreadRegion['centerline']> {
+  return {
+    type: 'Feature',
+    properties: null,
+    geometry: feature.geometry,
+  };
+}
+
+function serializeLineFeature(feature: NonNullable<SpreadRegion['centerline']>): string {
+  return JSON.stringify(normalizeLineFeature(feature));
+}
+
+function parseLineFeature(value: unknown, path: string): NonNullable<SpreadRegion['centerline']> {
+  let parsedValue = value;
+
+  if (typeof value === 'string') {
+    try {
+      parsedValue = JSON.parse(value);
+    } catch (error) {
+      throw new Error(`Line feature at ${path} is not valid JSON: ${(error as Error).message}`);
+    }
+  }
+
+  if (!isLineFeature(parsedValue)) {
+    throw new Error(`Line feature at ${path} is not valid GeoJSON`);
+  }
+
+  return normalizeLineFeature(parsedValue);
+}
+
 function yearDocRef(year: number) {
   return doc(firestore(), MANURE_YEARS_COLLECTION, String(year));
 }
@@ -114,6 +278,14 @@ function subcollectionRef(year: number, name: string) {
 
 function metadataCollectionRef(year: number, name: MetadataCollectionName) {
   return subcollectionRef(year, name);
+}
+
+function spreadRegionsCollectionRef(year: number) {
+  return subcollectionRef(year, SPREAD_REGIONS_COLLECTION);
+}
+
+function spreadRegionAssignmentsCollectionRef(year: number) {
+  return subcollectionRef(year, SPREAD_REGION_ASSIGNMENTS_COLLECTION);
 }
 
 function accessDocRef(email: string) {
@@ -239,9 +411,13 @@ function sortLoads(loads: LoadsRecord[]): LoadsRecord[] {
 }
 
 function toField(snapshot: QueryDocumentSnapshot<DocumentData>): Field {
+  const data = snapshot.data() as StoredFieldDocument;
+  const boundary = parseFieldBoundary(data.boundary, snapshot.ref.path);
   return {
     id: snapshot.id,
-    ...(snapshot.data() as Omit<Field, 'id'>),
+    ...data,
+    acreage: nominalFieldAcreage(data.name, boundary),
+    boundary,
   };
 }
 
@@ -266,6 +442,25 @@ function toLoad(snapshot: QueryDocumentSnapshot<DocumentData>): LoadsRecord {
   };
 }
 
+function toSpreadRegion(snapshot: QueryDocumentSnapshot<DocumentData>): SpreadRegion {
+  const data = snapshot.data() as StoredSpreadRegionDocument;
+  return {
+    id: snapshot.id,
+    ...data,
+    polygon: parsePolygonFeature(data.polygon, `${snapshot.ref.path}.polygon`),
+    centerline: typeof data.centerline === 'undefined'
+      ? undefined
+      : parseLineFeature(data.centerline, `${snapshot.ref.path}.centerline`),
+  };
+}
+
+function toSpreadRegionAssignment(snapshot: QueryDocumentSnapshot<DocumentData>): SpreadRegionAssignment {
+  return {
+    id: snapshot.id,
+    ...(snapshot.data() as Omit<SpreadRegionAssignment, 'id'>),
+  };
+}
+
 function toAccessRecord(snapshot: QueryDocumentSnapshot<DocumentData>): AccessRecord {
   return {
     email: snapshot.id,
@@ -275,6 +470,49 @@ function toAccessRecord(snapshot: QueryDocumentSnapshot<DocumentData>): AccessRe
 
 function sortAccessRecords(records: AccessRecord[]): AccessRecord[] {
   return [ ...records ].sort((left, right) => left.email.localeCompare(right.email));
+}
+
+function sortSpreadRegions(regions: SpreadRegion[]): SpreadRegion[] {
+  return [ ...regions ].sort((left, right) => {
+    const byField = left.field.localeCompare(right.field);
+    if (byField !== 0) return byField;
+    const byStart = (left.dateStart || '').localeCompare(right.dateStart || '');
+    if (byStart !== 0) return byStart;
+    const byEnd = (left.dateEnd || '').localeCompare(right.dateEnd || '');
+    if (byEnd !== 0) return byEnd;
+    return (left.id || '').localeCompare(right.id || '');
+  });
+}
+
+function sortSpreadRegionAssignments(assignments: SpreadRegionAssignment[]): SpreadRegionAssignment[] {
+  return [ ...assignments ].sort((left, right) => {
+    const byDate = left.date.localeCompare(right.date);
+    if (byDate !== 0) return byDate;
+    const byField = left.field.localeCompare(right.field);
+    if (byField !== 0) return byField;
+    const bySource = left.source.localeCompare(right.source);
+    if (bySource !== 0) return bySource;
+    const byRegion = left.regionId.localeCompare(right.regionId);
+    if (byRegion !== 0) return byRegion;
+    return (left.id || '').localeCompare(right.id || '');
+  });
+}
+
+function normalizeSourceDefaults(source: Source): Source {
+  return {
+    ...source,
+    spreadWidthFeet: source.spreadWidthFeet ?? DEFAULT_SOURCE_SPREAD_WIDTH_FEET,
+    defaultLoadLengthFeet: source.defaultLoadLengthFeet ?? DEFAULT_SOURCE_LOAD_LENGTH_FEET,
+  };
+}
+
+function normalizeSourcesDefaults(sources: Source[]): Source[] {
+  return sources.map(normalizeSourceDefaults);
+}
+
+function currentActorEmail(fallback = 'migration'): string {
+  const email = getBrowserFirebase().auth.currentUser?.email?.trim().toLowerCase();
+  return email || fallback;
 }
 
 async function ensureYearDocument(year: number): Promise<void> {
@@ -292,7 +530,7 @@ async function ensureYearDocument(year: number): Promise<void> {
   await setDoc(yearRef, {
     year,
     createdAt: nowIso(),
-    schemaVersion: 1,
+    schemaVersion: CURRENT_MANURE_SCHEMA_VERSION,
   });
 }
 
@@ -334,6 +572,78 @@ async function ensureYearBootstrap(year: number): Promise<void> {
   await Promise.all(METADATA_COLLECTIONS.map(name => copyMetadataCollectionFromPreviousYear(year, name)));
 }
 
+async function migrateYearSchemaIfNeeded(
+  year: number,
+  data: Omit<ManureAppData, 'previousLoads'>,
+  currentSchemaVersion: number,
+): Promise<void> {
+  const normalizedSources = normalizeSourcesDefaults(data.sources);
+  const sourcesNeedMigration = normalizedSources.some((source, index) => (
+    source.spreadWidthFeet !== data.sources[index]?.spreadWidthFeet
+    || source.defaultLoadLengthFeet !== data.sources[index]?.defaultLoadLengthFeet
+  ));
+  const fieldsNeedMigration = data.fields.some(field => typeof field.defaultHeadingDegrees === 'undefined');
+  const schemaNeedsMigration = currentSchemaVersion < CURRENT_MANURE_SCHEMA_VERSION;
+
+  if (!sourcesNeedMigration && !fieldsNeedMigration && !schemaNeedsMigration) {
+    return;
+  }
+
+  info(
+    'Migrating manure schema year=%d fromVersion=%d sourcesNeedMigration=%s fieldsNeedMigration=%s',
+    year,
+    currentSchemaVersion,
+    sourcesNeedMigration,
+    fieldsNeedMigration,
+  );
+
+  const actorEmail = currentActorEmail();
+  const timestamp = nowIso();
+  const batch = writeBatch(firestore());
+
+  if (fieldsNeedMigration) {
+    for (const field of data.fields) {
+      batch.set(doc(metadataCollectionRef(year, 'fields'), field.id!), stripUndefined({
+        name: field.name,
+        acreage: field.acreage,
+        boundary: serializeFieldBoundary(field.boundary),
+        defaultHeadingDegrees: field.defaultHeadingDegrees,
+        createdAt: field.createdAt || timestamp,
+        updatedAt: timestamp,
+        updatedBy: actorEmail,
+      }));
+    }
+  }
+
+  if (sourcesNeedMigration) {
+    for (const source of normalizedSources) {
+      batch.set(doc(metadataCollectionRef(year, 'sources'), source.id!), stripUndefined({
+        name: source.name,
+        type: source.type,
+        acPerLoad: source.acPerLoad,
+        spreadWidthFeet: source.spreadWidthFeet,
+        defaultLoadLengthFeet: source.defaultLoadLengthFeet,
+        createdAt: source.createdAt || timestamp,
+        updatedAt: timestamp,
+        updatedBy: actorEmail,
+      }));
+    }
+    data.sources = sortByName(normalizedSources);
+  }
+
+  if (schemaNeedsMigration) {
+    batch.set(yearDocRef(year), {
+      year,
+      schemaVersion: CURRENT_MANURE_SCHEMA_VERSION,
+      migratedAt: timestamp,
+      migratedBy: actorEmail,
+      updatedAt: timestamp,
+    }, { merge: true });
+  }
+
+  await batch.commit();
+}
+
 async function loadCurrentYear(year: number): Promise<Omit<ManureAppData, 'previousLoads'>> {
   info('Loading current manure data for year=%d', year);
   try {
@@ -346,30 +656,43 @@ async function loadCurrentYear(year: number): Promise<Omit<ManureAppData, 'previ
   }
 
   const offlineYearMessage = `Unable to load manure data for ${year} while offline. Connect once online so it can be cached, then retry.`;
-
-  const [ fieldSnapshot, sourceSnapshot, driverSnapshot, loadSnapshot ] = await Promise.all([
+  const yearSnapshot = await getDocWithOfflineFallback(yearDocRef(year), offlineYearMessage);
+  const [ fieldSnapshot, sourceSnapshot, driverSnapshot, loadSnapshot, regionSnapshot, assignmentSnapshot ] = await Promise.all([
     getDocsWithOfflineFallback(metadataCollectionRef(year, 'fields'), `${MANURE_YEARS_COLLECTION}/${year}/fields`, offlineYearMessage),
     getDocsWithOfflineFallback(metadataCollectionRef(year, 'sources'), `${MANURE_YEARS_COLLECTION}/${year}/sources`, offlineYearMessage),
     getDocsWithOfflineFallback(metadataCollectionRef(year, 'drivers'), `${MANURE_YEARS_COLLECTION}/${year}/drivers`, offlineYearMessage),
     getDocsWithOfflineFallback(subcollectionRef(year, 'loads'), `${MANURE_YEARS_COLLECTION}/${year}/loads`, offlineYearMessage),
+    getDocsWithOfflineFallback(spreadRegionsCollectionRef(year), `${MANURE_YEARS_COLLECTION}/${year}/${SPREAD_REGIONS_COLLECTION}`, offlineYearMessage),
+    getDocsWithOfflineFallback(spreadRegionAssignmentsCollectionRef(year), `${MANURE_YEARS_COLLECTION}/${year}/${SPREAD_REGION_ASSIGNMENTS_COLLECTION}`, offlineYearMessage),
   ]);
 
+  const currentYear: Omit<ManureAppData, 'previousLoads'> = {
+    year,
+    fields: sortByName(fieldSnapshot.docs.map(toField)),
+    sources: sortByName(normalizeSourcesDefaults(sourceSnapshot.docs.map(toSource))),
+    drivers: sortByName(driverSnapshot.docs.map(toDriver)),
+    loads: sortLoads(loadSnapshot.docs.map(toLoad)),
+    regions: sortSpreadRegions(regionSnapshot.docs.map(toSpreadRegion)),
+    regionAssignments: sortSpreadRegionAssignments(assignmentSnapshot.docs.map(toSpreadRegionAssignment)),
+  };
+
+  const currentSchemaVersion = Number((yearSnapshot.data() as { schemaVersion?: unknown } | undefined)?.schemaVersion || 1);
+  if (!yearSnapshot.metadata.fromCache) {
+    await migrateYearSchemaIfNeeded(year, currentYear, currentSchemaVersion);
+  }
+
   info(
-    'Loaded current manure data for year=%d fields=%d sources=%d drivers=%d loads=%d',
+    'Loaded current manure data for year=%d fields=%d sources=%d drivers=%d loads=%d regions=%d assignments=%d',
     year,
     fieldSnapshot.size,
     sourceSnapshot.size,
     driverSnapshot.size,
     loadSnapshot.size,
+    regionSnapshot.size,
+    assignmentSnapshot.size,
   );
 
-  return {
-    year,
-    fields: sortByName(fieldSnapshot.docs.map(toField)),
-    sources: sortByName(sourceSnapshot.docs.map(toSource)),
-    drivers: sortByName(driverSnapshot.docs.map(toDriver)),
-    loads: sortLoads(loadSnapshot.docs.map(toLoad)),
-  };
+  return currentYear;
 }
 
 export async function loadManureAppData(year: number): Promise<ManureAppData> {
@@ -399,8 +722,10 @@ export async function saveFields(year: number, fields: Field[], actorEmail: stri
 
   const normalizedFields = fields.map((field) => {
     const timestamp = nowIso();
+    const acreage = nominalFieldAcreage(field.name, field.boundary);
     return {
       ...field,
+      acreage,
       id: field.id || makeEntityId('field'),
       createdAt: field.createdAt || timestamp,
       updatedAt: timestamp,
@@ -425,7 +750,9 @@ export async function saveFields(year: number, fields: Field[], actorEmail: stri
   for (const field of normalizedFields) {
     batch.set(doc(metadataCollectionRef(year, 'fields'), field.id!), stripUndefined({
       name: field.name,
-      boundary: field.boundary,
+      acreage: field.acreage,
+      boundary: serializeFieldBoundary(field.boundary),
+      defaultHeadingDegrees: field.defaultHeadingDegrees,
       createdAt: field.createdAt,
       updatedAt: field.updatedAt,
       updatedBy: field.updatedBy,
@@ -437,6 +764,93 @@ export async function saveFields(year: number, fields: Field[], actorEmail: stri
   return sortByName(normalizedFields);
 }
 
+export async function saveSources(year: number, sources: Source[], actorEmail: string): Promise<Source[]> {
+  await ensureYearDocument(year);
+  const normalizedSources = normalizeSourcesDefaults(sources).map((source) => {
+    const timestamp = nowIso();
+    return {
+      ...source,
+      id: source.id || makeEntityId('source'),
+      createdAt: source.createdAt || timestamp,
+      updatedAt: timestamp,
+      updatedBy: actorEmail,
+    };
+  });
+
+  const currentSnapshot = await getDocsWithOfflineFallback(
+    metadataCollectionRef(year, 'sources'),
+    `${MANURE_YEARS_COLLECTION}/${year}/sources`,
+    `Unable to update sources for ${year} while offline before the current source list has been cached. Connect once online, then retry.`,
+  );
+  const nextIds = new Set(normalizedSources.map(source => source.id!));
+  const batch = writeBatch(firestore());
+
+  for (const docSnapshot of currentSnapshot.docs) {
+    if (!nextIds.has(docSnapshot.id)) {
+      batch.delete(docSnapshot.ref);
+    }
+  }
+
+  for (const source of normalizedSources) {
+    batch.set(doc(metadataCollectionRef(year, 'sources'), source.id!), stripUndefined({
+      name: source.name,
+      type: source.type,
+      acPerLoad: source.acPerLoad,
+      spreadWidthFeet: source.spreadWidthFeet,
+      defaultLoadLengthFeet: source.defaultLoadLengthFeet,
+      createdAt: source.createdAt,
+      updatedAt: source.updatedAt,
+      updatedBy: source.updatedBy,
+    }));
+  }
+
+  await batch.commit();
+  info('Saved manure sources for year=%d count=%d actor=%s', year, normalizedSources.length, actorEmail);
+  return sortByName(normalizedSources);
+}
+
+export async function saveDrivers(year: number, drivers: Driver[], actorEmail: string): Promise<Driver[]> {
+  await ensureYearDocument(year);
+
+  const normalizedDrivers = drivers.map((driver) => {
+    const timestamp = nowIso();
+    return {
+      ...driver,
+      id: driver.id || makeEntityId('driver'),
+      createdAt: driver.createdAt || timestamp,
+      updatedAt: timestamp,
+      updatedBy: actorEmail,
+    };
+  });
+
+  const currentSnapshot = await getDocsWithOfflineFallback(
+    metadataCollectionRef(year, 'drivers'),
+    `${MANURE_YEARS_COLLECTION}/${year}/drivers`,
+    `Unable to update drivers for ${year} while offline before the current driver list has been cached. Connect once online, then retry.`,
+  );
+  const nextIds = new Set(normalizedDrivers.map(driver => driver.id!));
+  const batch = writeBatch(firestore());
+
+  for (const docSnapshot of currentSnapshot.docs) {
+    if (!nextIds.has(docSnapshot.id)) {
+      batch.delete(docSnapshot.ref);
+    }
+  }
+
+  for (const driver of normalizedDrivers) {
+    batch.set(doc(metadataCollectionRef(year, 'drivers'), driver.id!), stripUndefined({
+      name: driver.name,
+      createdAt: driver.createdAt,
+      updatedAt: driver.updatedAt,
+      updatedBy: driver.updatedBy,
+    }));
+  }
+
+  await batch.commit();
+  info('Saved manure drivers for year=%d count=%d actor=%s', year, normalizedDrivers.length, actorEmail);
+  return sortByName(normalizedDrivers);
+}
+
 export function createLoadRecordId(load: Pick<LoadsRecord, 'date' | 'field' | 'source' | 'driver'>): string {
   return [
     load.date,
@@ -444,6 +858,124 @@ export function createLoadRecordId(load: Pick<LoadsRecord, 'date' | 'field' | 's
     normalizeKeyPart(load.source),
     normalizeKeyPart(load.driver),
   ].join('__');
+}
+
+export function createSpreadRegionAssignmentId(
+  assignment: Pick<SpreadRegionAssignment, 'regionId' | 'loadGroupKey'>,
+): string {
+  return `${assignment.regionId}__${assignment.loadGroupKey}`;
+}
+
+export async function saveSpreadRegions(
+  year: number,
+  regions: SpreadRegion[],
+  actorEmail: string,
+): Promise<SpreadRegion[]> {
+  await ensureYearDocument(year);
+
+  const normalizedRegions = regions.map((region) => {
+    const timestamp = nowIso();
+    return {
+      ...region,
+      id: region.id || makeEntityId('region'),
+      polygon: normalizePolygonFeature(region.polygon),
+      centerline: region.centerline ? normalizeLineFeature(region.centerline) : undefined,
+      createdAt: region.createdAt || timestamp,
+      updatedAt: timestamp,
+      updatedBy: actorEmail,
+    };
+  });
+
+  const currentSnapshot = await getDocsWithOfflineFallback(
+    spreadRegionsCollectionRef(year),
+    `${MANURE_YEARS_COLLECTION}/${year}/${SPREAD_REGIONS_COLLECTION}`,
+    `Unable to update spread regions for ${year} while offline before the current region list has been cached. Connect once online, then retry.`,
+  );
+  const nextIds = new Set(normalizedRegions.map(region => region.id!));
+  const batch = writeBatch(firestore());
+
+  for (const docSnapshot of currentSnapshot.docs) {
+    if (!nextIds.has(docSnapshot.id)) {
+      batch.delete(docSnapshot.ref);
+    }
+  }
+
+  for (const region of normalizedRegions) {
+    batch.set(doc(spreadRegionsCollectionRef(year), region.id!), stripUndefined({
+      field: region.field,
+      mode: region.mode,
+      polygon: serializePolygonFeature(region.polygon),
+      centerline: region.centerline ? serializeLineFeature(region.centerline) : undefined,
+      headingDegrees: region.headingDegrees,
+      spreadWidthFeet: region.spreadWidthFeet,
+      dateStart: region.dateStart,
+      dateEnd: region.dateEnd,
+      supersededByRegionId: region.supersededByRegionId,
+      createdAt: region.createdAt,
+      updatedAt: region.updatedAt,
+      updatedBy: region.updatedBy,
+    }));
+  }
+
+  await batch.commit();
+  info('Saved manure spread regions for year=%d count=%d actor=%s', year, normalizedRegions.length, actorEmail);
+  return sortSpreadRegions(normalizedRegions);
+}
+
+export async function saveSpreadRegionAssignments(
+  year: number,
+  assignments: SpreadRegionAssignment[],
+  actorEmail: string,
+): Promise<SpreadRegionAssignment[]> {
+  await ensureYearDocument(year);
+
+  const normalizedAssignments = assignments.map((assignment) => {
+    const timestamp = nowIso();
+    const loadGroupKey = createLoadGroupKey(assignment);
+    return {
+      ...assignment,
+      id: assignment.id || createSpreadRegionAssignmentId({
+        regionId: assignment.regionId,
+        loadGroupKey,
+      }),
+      loadGroupKey,
+      createdAt: assignment.createdAt || timestamp,
+      updatedAt: timestamp,
+      updatedBy: actorEmail,
+    };
+  });
+
+  const currentSnapshot = await getDocsWithOfflineFallback(
+    spreadRegionAssignmentsCollectionRef(year),
+    `${MANURE_YEARS_COLLECTION}/${year}/${SPREAD_REGION_ASSIGNMENTS_COLLECTION}`,
+    `Unable to update spread region assignments for ${year} while offline before the current assignment list has been cached. Connect once online, then retry.`,
+  );
+  const nextIds = new Set(normalizedAssignments.map(assignment => assignment.id!));
+  const batch = writeBatch(firestore());
+
+  for (const docSnapshot of currentSnapshot.docs) {
+    if (!nextIds.has(docSnapshot.id)) {
+      batch.delete(docSnapshot.ref);
+    }
+  }
+
+  for (const assignment of normalizedAssignments) {
+    batch.set(doc(spreadRegionAssignmentsCollectionRef(year), assignment.id!), stripUndefined({
+      regionId: assignment.regionId,
+      loadGroupKey: assignment.loadGroupKey,
+      date: assignment.date,
+      field: assignment.field,
+      source: assignment.source,
+      loadCount: assignment.loadCount,
+      createdAt: assignment.createdAt,
+      updatedAt: assignment.updatedAt,
+      updatedBy: assignment.updatedBy,
+    }));
+  }
+
+  await batch.commit();
+  info('Saved manure spread region assignments for year=%d count=%d actor=%s', year, normalizedAssignments.length, actorEmail);
+  return sortSpreadRegionAssignments(normalizedAssignments);
 }
 
 export async function saveLoadRecord(year: number, load: LoadsRecord, actorEmail: string): Promise<LoadsRecord> {

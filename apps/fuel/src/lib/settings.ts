@@ -11,6 +11,8 @@ import type {
 export const SETTINGS_FOLDER_PATH = '/Ault Farms Shared/LiveData/Fuel';
 export const SETTINGS_FILE_NAME = 'fuel_report_settings';
 export const SETTINGS_FILE_PATH = `${SETTINGS_FOLDER_PATH}/${SETTINGS_FILE_NAME}`;
+export const EXPORTS_FOLDER_NAME = 'Exports';
+export const EXPORTS_FOLDER_PATH = `${SETTINGS_FOLDER_PATH}/${EXPORTS_FOLDER_NAME}`;
 
 type WorksheetDefinition = {
   name: 'groups' | 'people' | 'vehicles' | 'pumps';

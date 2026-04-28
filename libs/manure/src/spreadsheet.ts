@@ -3,6 +3,7 @@ import type { Driver, Field, LoadsRecord, Source } from './types.js';
 export type FieldSheetRow = {
   id: string;
   name: string;
+  acreage: number;
   boundary: string;
 };
 
@@ -32,6 +33,7 @@ export function fieldToSheetRow(field: Field): FieldSheetRow {
   return {
     id: field.id || '',
     name: field.name,
+    acreage: field.acreage,
     boundary: JSON.stringify(field.boundary),
   };
 }

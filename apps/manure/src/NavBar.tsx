@@ -51,18 +51,27 @@ export const NavBar = observer(() => {
           onClose={handleMenuClose}
         >
           <MenuItem disabled>{state.auth.email}</MenuItem>
-          <MenuItem disabled>Cache: {state.auth.cacheMode}</MenuItem>
           <MenuItem onClick={() => { actions.mode(state.mode === 'loads' ? 'fields' : 'loads'); handleMenuClose(); }}>
             Manage {state.mode === 'loads' ? 'Fields' : 'Loads'}
+          </MenuItem>
+          <MenuItem onClick={() => { actions.openHistoryModal(); handleMenuClose(); }}>
+            History
           </MenuItem>
           {state.auth.admin && (
             <MenuItem onClick={() => { void actions.openAccessManagementModal(); handleMenuClose(); }}>
               Manage Access
             </MenuItem>
           )}
-          <MenuItem onClick={() => { actions.toggleConfigModal(); handleMenuClose(); }}>
-            Config
-          </MenuItem>
+          {state.auth.admin && (
+            <MenuItem onClick={() => { actions.openSourceManagementModal(); handleMenuClose(); }}>
+              Manage Sources
+            </MenuItem>
+          )}
+          {state.auth.admin && (
+            <MenuItem onClick={() => { actions.openDriverManagementModal(); handleMenuClose(); }}>
+              Manage Drivers
+            </MenuItem>
+          )}
           <MenuItem onClick={() => { actions.signOut(); handleMenuClose(); }}>
             Sign out
           </MenuItem>

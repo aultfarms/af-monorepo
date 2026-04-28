@@ -8,6 +8,7 @@ import {
   formatReportBoundary,
   formatRowDateTime,
   MONTH_NAMES,
+  toFileStem,
 } from './lib/date';
 import { countTransactionsForReportPeriod, getAvailableReportYears } from './lib/reporting';
 import type { FuelSettings, FuelTransaction } from './lib/types';
@@ -42,6 +43,21 @@ function getMappedLabel(id: string, name?: string) {
     return id;
   }
   return `${id} — ${name}`;
+}
+
+function formatMonthKeyLabel(monthKey?: string) {
+  if (!monthKey) {
+    return '';
+  }
+
+  const [yearText, monthText] = monthKey.split('-');
+  const year = Number(yearText);
+  const month = Number(monthText);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
+    return monthKey;
+  }
+
+  return formatMonthYearLabel(month, year);
 }
 
 function getTransactionStatus(
@@ -140,9 +156,36 @@ function LoadedTransactionsTable({
   );
 }
 
+function ExportFileNameList({
+  fileNames,
+  targetFileName,
+  compact = false,
+}: {
+  fileNames: string[];
+  targetFileName?: string | null;
+  compact?: boolean;
+}) {
+  return (
+    <ul className={`export-file-list ${compact ? 'compact' : ''}`}>
+      {fileNames.map((fileName, index) => {
+        const isTarget = fileName === targetFileName;
+        return (
+          <li key={`${fileName}:${index}`} className={isTarget ? 'target' : ''}>
+            <span className="export-file-name">{fileName}</span>
+            {isTarget ? <span className="export-file-badge">Selected month</span> : null}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 export const App = observer(function App() {
   const { state, actions } = React.useContext(context);
   const reportFeedbackRef = React.useRef<HTMLDivElement | null>(null);
+  const loadedDataRef = React.useRef<HTMLElement | null>(null);
+  const previousDriveLoadBusyRef = React.useRef(state.driveLoadBusy);
+  const previousExportSummaryRef = React.useRef(state.exportSummary);
 
   const { getRootProps, getInputProps, isDragActive, isDragReject, open } = useDropzone({
     accept: { 'application/zip': ['.zip'] },
@@ -172,15 +215,43 @@ export const App = observer(function App() {
   );
 
   const availableYears = React.useMemo(
-    () => getAvailableReportYears(state.transactions, state.reportYear),
-    [state.transactions, state.reportYear],
+    () => {
+      const years = new Set(getAvailableReportYears(state.transactions, state.reportYear));
+      state.availableDriveExports.forEach(file => years.add(file.year));
+      return Array.from(years).sort((left, right) => left - right);
+    },
+    [state.availableDriveExports, state.transactions, state.reportYear],
   );
+
+  const selectedMonthKey = toFileStem(state.reportMonth, state.reportYear);
+  const driveExportsError = state.driveExportsListingError || state.driveExportsSelectionError;
+  const driveLoadedDataNeedsRefresh = Boolean(
+    state.exportSummary?.source === 'google-drive' &&
+      state.exportSummary.requestedMonthKey &&
+      state.exportSummary.requestedMonthKey !== selectedMonthKey,
+  );
+  const loadedDriveMonthLabel = formatMonthKeyLabel(state.exportSummary?.requestedMonthKey);
 
   React.useEffect(() => {
     if (state.reportError || state.lastDownload) {
       reportFeedbackRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
   }, [state.reportError, state.lastDownload]);
+
+  React.useEffect(() => {
+    const justFinishedSuccessfulDriveLoad =
+      previousDriveLoadBusyRef.current &&
+      !state.driveLoadBusy &&
+      state.exportSummary?.source === 'google-drive' &&
+      previousExportSummaryRef.current !== state.exportSummary;
+
+    if (justFinishedSuccessfulDriveLoad) {
+      loadedDataRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    previousDriveLoadBusyRef.current = state.driveLoadBusy;
+    previousExportSummaryRef.current = state.exportSummary;
+  }, [state.driveLoadBusy, state.exportSummary]);
 
   return (
     <div className="app-shell">
@@ -190,8 +261,9 @@ export const App = observer(function App() {
             <div className="eyebrow">Ault Farms</div>
             <h1>Fuel Reports</h1>
             <p>
-              Drop a ZIP of exported fuel-system CSVs, choose the reporting month, and download
-              the full and print-version PDFs as a ZIP.
+                Load fuel export CSVs from Google Drive for the selected report month, or fall
+                back to a manual ZIP upload, then download the full and print-version PDFs as a
+                ZIP.
             </p>
           </div>
         </header>
@@ -265,42 +337,155 @@ export const App = observer(function App() {
               </div>
             </section>
 
-            {!state.exportSummary ? (
-              <section className="panel">
-                <h2>Load fuel exports</h2>
-                <div
-                  {...getRootProps()}
-                  className={`dropzone ${isDragActive ? 'active' : ''} ${isDragReject ? 'reject' : ''}`}
-                  onClick={open}
-                >
-                  <input {...getInputProps()} />
-                  <h3>{isDragActive ? 'Drop the ZIP here' : 'Drop export ZIP here'}</h3>
-                  <p>
-                    {isDragReject
-                      ? 'Only ZIP files are accepted.'
-                      : 'The ZIP should contain one or more exported CSVs from the fuel system.'}
+            <section className="panel">
+              <div className="panel-header">
+                <div>
+                  <h2>Load fuel exports</h2>
+                  <p className="muted">
+                    Google Drive is the default source. Select the report month to choose the
+                    matching CSV plus up to two earlier and two later exports.
                   </p>
-                  <button className="primary-button" type="button">
-                    Choose ZIP File
+                </div>
+                <div className="button-row">
+                  <button
+                    className="secondary-button"
+                    disabled={state.driveExportsBusy || state.driveLoadBusy}
+                    onClick={() => void actions.refreshDriveExports()}
+                  >
+                    {state.driveExportsBusy ? 'Refreshing…' : 'Refresh Exports Folder'}
                   </button>
                 </div>
-              </section>
-            ) : (
+              </div>
+              <div className="controls-row">
+                <label className="control-group">
+                  <span>Month</span>
+                  <select
+                    value={state.reportMonth}
+                    onChange={event => actions.setReportMonth(Number(event.target.value))}
+                  >
+                    {MONTH_NAMES.map((monthName, index) => (
+                      <option key={monthName} value={index + 1}>
+                        {monthName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="control-group">
+                  <span>Year</span>
+                  <select
+                    value={state.reportYear}
+                    onChange={event => actions.setReportYear(Number(event.target.value))}
+                  >
+                    {availableYears.map(year => (
+                      <option key={year} value={year}>
+                        {year}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="control-group grow">
+                  <span>Report window</span>
+                  <div className="report-window">{reportWindow}</div>
+                </div>
+              </div>
+              <div className="summary-strip">
+                <div>
+                  <div className="info-label">Selected period</div>
+                  <strong>{formatMonthYearLabel(state.reportMonth, state.reportYear)}</strong>
+                </div>
+                <div>
+                  <div className="info-label">Drive CSVs in folder</div>
+                  <strong>{state.availableDriveExports.length}</strong>
+                </div>
+                <div>
+                  <div className="info-label">Files queued to load</div>
+                  <strong>{state.selectedDriveExports.length}</strong>
+                </div>
+              </div>
+              <div className="drive-export-card">
+                <div className="info-label">Google Drive Exports folder</div>
+                <code className="path-code">{state.driveExportsPath}</code>
+                {state.driveExportsBusy ? (
+                  <div className="report-feedback info export-status-box">
+                    <div className="loading-row">
+                      <div className="spinner small-spinner" aria-hidden="true" />
+                      <div>Refreshing the Google Drive export file list…</div>
+                    </div>
+                  </div>
+                ) : driveExportsError ? (
+                  <div className="report-feedback error export-status-box">
+                    <h3>Could not select Drive exports</h3>
+                    <p>{driveExportsError}</p>
+                  </div>
+                ) : (
+                  <div className="export-selection-stack">
+                    <p className="muted">
+                      The selected month matches{' '}
+                      <code>{state.selectedDriveExportTarget?.name || `${selectedMonthKey}.csv`}</code>.
+                      Loading from Drive will use that file plus the nearby exports shown below.
+                    </p>
+                    <ExportFileNameList
+                      fileNames={state.selectedDriveExports.map(file => file.name)}
+                      targetFileName={state.selectedDriveExportTarget?.name}
+                    />
+                  </div>
+                )}
+                <div className="button-row">
+                  <button
+                    className="primary-button"
+                    disabled={
+                      state.driveExportsBusy ||
+                      state.driveLoadBusy ||
+                      state.selectedDriveExports.length < 1
+                    }
+                    onClick={() => void actions.loadSelectedDriveExports()}
+                  >
+                    {state.driveLoadBusy ? 'Loading exports…' : 'Load exports from Google Drive'}
+                  </button>
+                </div>
+              </div>
+              <div className="manual-upload-divider">Or load a ZIP manually</div>
+              <div
+                {...getRootProps()}
+                className={`dropzone ${isDragActive ? 'active' : ''} ${isDragReject ? 'reject' : ''}`}
+                onClick={open}
+              >
+                <input {...getInputProps()} />
+                <h3>{isDragActive ? 'Drop the ZIP here' : 'Drop export ZIP here'}</h3>
+                <p>
+                  {isDragReject
+                    ? 'Only ZIP files are accepted.'
+                    : 'Use this if you want to override the Google Drive exports with a manual archive.'}
+                </p>
+                <button className="secondary-button" type="button">
+                  Choose ZIP File
+                </button>
+              </div>
+            </section>
+
+            {state.exportSummary ? (
               <>
-                <section className="panel success-panel">
+                <section ref={loadedDataRef} className="panel success-panel">
                   <div className="panel-header">
                     <div>
-                      <h2>Export ZIP loaded successfully</h2>
+                      <h2>Source data loaded</h2>
                       <p className="muted">
-                        {state.exportSummary.fileName} is ready for reporting.
+                        {state.exportSummary.source === 'google-drive' &&
+                        state.exportSummary.requestedMonthKey
+                          ? `${state.exportSummary.sourceLabel} for ${loadedDriveMonthLabel || state.exportSummary.requestedMonthKey} is ready for reporting.`
+                          : `${state.exportSummary.fileName} is ready for reporting.`}
                       </p>
                     </div>
-                    <button className="secondary-button" onClick={open}>
-                      Load Different ZIP
-                    </button>
                   </div>
-                  <input {...getInputProps()} />
                   <div className="info-grid">
+                    <div>
+                      <div className="info-label">Source</div>
+                      <strong>{state.exportSummary.sourceLabel}</strong>
+                    </div>
+                    <div>
+                      <div className="info-label">Loaded archive</div>
+                      <strong>{state.exportSummary.fileName}</strong>
+                    </div>
                     <div>
                       <div className="info-label">CSV files</div>
                       <strong>{state.exportSummary.csvFileCount}</strong>
@@ -318,6 +503,21 @@ export const App = observer(function App() {
                       <strong>{state.exportSummary.maxDateText}</strong>
                     </div>
                   </div>
+                  {state.exportSummary.sourceFiles.length > 0 ? (
+                    <div className="loaded-source-files">
+                      <div className="info-label">CSV files used</div>
+                      <ExportFileNameList
+                        fileNames={state.exportSummary.sourceFiles}
+                        targetFileName={
+                          state.exportSummary.source === 'google-drive' &&
+                          state.exportSummary.requestedMonthKey
+                            ? `${state.exportSummary.requestedMonthKey}.csv`
+                            : null
+                        }
+                        compact
+                      />
+                    </div>
+                  ) : null}
                   <LoadedTransactionsTable
                     transactions={state.transactions}
                     settings={state.settings}
@@ -326,58 +526,44 @@ export const App = observer(function App() {
 
                 <section className="panel">
                   <h2>Create report</h2>
-                  <div className="controls-row">
-                    <label className="control-group">
-                      <span>Month</span>
-                      <select
-                        value={state.reportMonth}
-                        onChange={event => actions.setReportMonth(Number(event.target.value))}
-                      >
-                        {MONTH_NAMES.map((monthName, index) => (
-                          <option key={monthName} value={index + 1}>
-                            {monthName}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="control-group">
-                      <span>Year</span>
-                      <select
-                        value={state.reportYear}
-                        onChange={event => actions.setReportYear(Number(event.target.value))}
-                      >
-                        {availableYears.map(year => (
-                          <option key={year} value={year}>
-                            {year}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <div className="control-group grow">
-                      <span>Report window</span>
-                      <div className="report-window">{reportWindow}</div>
-                    </div>
-                  </div>
                   <div className="summary-strip">
                     <div>
                       <div className="info-label">Selected period</div>
                       <strong>{formatMonthYearLabel(state.reportMonth, state.reportYear)}</strong>
                     </div>
                     <div>
+                      <div className="info-label">Report window</div>
+                      <strong>{reportWindow}</strong>
+                    </div>
+                    <div>
                       <div className="info-label">Transactions in window</div>
                       <strong>{selectedWindowTransactionCount}</strong>
                     </div>
                   </div>
+                  {driveLoadedDataNeedsRefresh ? (
+                    <div className="report-feedback info">
+                      <h3>Reload Google Drive exports</h3>
+                      <p>
+                        The loaded Drive data is for{' '}
+                        <strong>
+                          {loadedDriveMonthLabel || state.exportSummary.requestedMonthKey}
+                        </strong>
+                        . Load the Drive exports for{' '}
+                        <strong>{formatMonthYearLabel(state.reportMonth, state.reportYear)}</strong>{' '}
+                        before creating this report.
+                      </p>
+                    </div>
+                  ) : null}
                   <div className="button-row">
                     <button
                       className="primary-button"
-                      disabled={state.reportBusy}
+                      disabled={state.reportBusy || state.driveLoadBusy || driveLoadedDataNeedsRefresh}
                       onClick={() => void actions.createReport()}
                     >
                       {state.reportBusy ? 'Creating report…' : 'Create Report'}
                     </button>
                     <button className="secondary-button" onClick={actions.resetLoadedExport}>
-                      Clear Loaded ZIP
+                      Clear Loaded Data
                     </button>
                   </div>
                   <div ref={reportFeedbackRef} className="report-feedback-stack">
@@ -417,7 +603,7 @@ export const App = observer(function App() {
                   </div>
                 </section>
               </>
-            )}
+            ) : null}
           </>
         )}
       </div>

@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { observer } from 'mobx-react-lite';
-import { GeoJSON, MapContainer, TileLayer, useMap, useMapEvents } from 'react-leaflet';
+import { Circle, CircleMarker, GeoJSON, MapContainer, TileLayer, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import 'leaflet-draw';
@@ -76,21 +76,118 @@ const MapController = observer(() => {
   const { state } = React.useContext(context);
 
   useEffect(() => {
-    const currentCenter = map.getCenter();
-    const currentZoom = map.getZoom();
-    const targetCenter = state.mapView.center;
-    const targetZoom = state.mapView.zoom;
-
-    if (
-      currentCenter.lat !== targetCenter[0]
-      || currentCenter.lng !== targetCenter[1]
-      || currentZoom !== targetZoom
-    ) {
-      map.setView(targetCenter, targetZoom);
+    if (!state.mapBounds) {
+      return;
     }
-  }, [map, state.mapView.center, state.mapView.zoom]);
+    map.fitBounds(state.mapBounds, {
+      padding: [ 24, 24 ],
+      maxZoom: 18,
+    });
+  }, [map, state.mapBounds, state.mapCommandId]);
+  useEffect(() => {
+    const currentLocation = state.currentLocation?.center;
+    if (!currentLocation || map.getBounds().contains(currentLocation)) {
+      return;
+    }
+
+    const mapBounds = map.getBounds();
+    const nextBounds = L.latLngBounds(mapBounds.getSouthWest(), mapBounds.getNorthEast());
+    nextBounds.extend(currentLocation);
+    map.fitBounds(nextBounds, {
+      padding: [ 24, 24 ],
+      maxZoom: map.getZoom(),
+    });
+  }, [map, state.currentLocation]);
 
   return null;
+});
+
+const CurrentLocationTracker = () => {
+  const { actions } = React.useContext(context);
+  const lastErrorMessage = React.useRef('');
+
+  useEffect(() => {
+    if (!navigator.geolocation) {
+      const message = 'GPS location is not available on this device';
+      if (lastErrorMessage.current !== message) {
+        actions.snackbarMessage(message);
+        lastErrorMessage.current = message;
+      }
+      actions.clearCurrentLocation();
+      return;
+    }
+
+    const watchId = navigator.geolocation.watchPosition(
+      (position) => {
+        lastErrorMessage.current = '';
+        actions.currentLocation({
+          center: [ position.coords.latitude, position.coords.longitude ],
+          accuracyMeters: position.coords.accuracy || 0,
+        });
+      },
+      (error) => {
+        const message = error.code === 1
+          ? 'Location permission was denied'
+          : error.code === 2
+            ? 'GPS location is temporarily unavailable'
+            : 'GPS location request timed out';
+        if (lastErrorMessage.current !== message) {
+          actions.snackbarMessage(message);
+          lastErrorMessage.current = message;
+        }
+        if (error.code === 1 || error.code === 2) {
+          actions.clearCurrentLocation();
+        }
+      },
+      {
+        enableHighAccuracy: true,
+        maximumAge: 5000,
+        timeout: 20000,
+      },
+    );
+
+    return () => {
+      navigator.geolocation.clearWatch(watchId);
+    };
+  }, [actions]);
+
+  return null;
+};
+
+const CurrentLocationLayer = observer(() => {
+  const { state } = React.useContext(context);
+  const currentLocation = state.currentLocation;
+
+  if (!currentLocation) {
+    return null;
+  }
+
+  return (
+    <>
+      <Circle
+        center={currentLocation.center}
+        radius={Math.max(currentLocation.accuracyMeters, 4)}
+        pathOptions={{
+          color: '#1976d2',
+          fillColor: '#42a5f5',
+          fillOpacity: 0.18,
+          opacity: 0.5,
+          weight: 1,
+        }}
+      />
+      <CircleMarker
+        center={currentLocation.center}
+        radius={7}
+        pathOptions={{
+          color: '#ffffff',
+          fillColor: '#1976d2',
+          fillOpacity: 1,
+          opacity: 1,
+          weight: 2,
+        }}
+      />
+    </>
+  );
 });
 
 const FieldManagerDrawControl = observer(() => {
@@ -254,6 +351,7 @@ export const Map = observer(() => {
         url="https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/tile/{z}/{y}/{x}"
         attribution="Map services and data available from U.S. Geological Survey, National Geospatial Program."
       />
+      <CurrentLocationLayer />
 
       {showOperationMap && (
         <GeoJSON
@@ -361,6 +459,7 @@ export const Map = observer(() => {
         </>
       )}
 
+      <CurrentLocationTracker />
       <MapEvents />
       <MapController />
     </MapContainer>

@@ -5,8 +5,10 @@ import { NavBar } from './NavBar';
 import { Map } from './Map';
 import { LoadForm } from './LoadForm';
 import { FieldsForm } from './FieldsForm';
-import { ConfigModal } from './ConfigModal';
 import { AccessManagementModal } from './AccessManagementModal';
+import { HistoryModal } from './HistoryModal';
+import { SourceManagementModal } from './SourceManagementModal';
+import { DriverManagementModal } from './DriverManagementModal';
 import { BottomLoadButton } from './BottomLoadButton';
 import { LoadingIndicator } from './LoadingIndicator';
 import { context } from './state';
@@ -98,8 +100,10 @@ export const App = observer(() => {
             )}
       </div>
 
-      <ConfigModal />
       <AccessManagementModal />
+      <HistoryModal />
+      <SourceManagementModal />
+      <DriverManagementModal />
       <div style={{ height: '3em' }} />
       <BottomLoadButton />
       <Snackbar

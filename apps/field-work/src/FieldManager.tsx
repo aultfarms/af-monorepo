@@ -84,7 +84,7 @@ export const FieldManager = observer(() => {
               ))}
             </Select>
           </FormControl>
-          <IconButton edge="end" onClick={() => selectedField && actions.moveMapToField(selectedField.name)} disabled={!selectedField} sx={{ mt: 0.5 }}>
+          <IconButton edge="end" onClick={() => selectedField && actions.showFieldOnMap(selectedField.name)} disabled={!selectedField} sx={{ mt: 0.5 }}>
             <GpsFixedIcon />
           </IconButton>
           <IconButton edge="end" onClick={() => selectedField && actions.deleteFieldDraft(selectedField.name)} disabled={!selectedField} sx={{ mt: 0.5 }}>

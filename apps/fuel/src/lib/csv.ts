@@ -120,6 +120,7 @@ export async function parseFuelExportsZipFile(file: File): Promise<{
   const entries = Object.values(zip.files)
     .filter(entry => !entry.dir && entry.name.toLowerCase().endsWith('.csv'))
     .sort((a, b) => a.name.localeCompare(b.name));
+  const sourceFiles = entries.map(entry => entry.name.split('/').pop() || entry.name);
 
   if (entries.length < 1) {
     throw new Error('The ZIP file does not contain any CSV fuel exports.');
@@ -151,6 +152,9 @@ export async function parseFuelExportsZipFile(file: File): Promise<{
       transactionCount: transactions.length,
       minDateText: formatRowDateTime(first.date),
       maxDateText: formatRowDateTime(last.date),
+      sourceFiles,
+      source: 'manual-zip',
+      sourceLabel: 'ZIP upload',
     },
   };
 }

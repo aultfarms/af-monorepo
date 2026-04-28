@@ -1,7 +1,8 @@
 import React from 'react';
 import { observer } from 'mobx-react-lite';
 import { Add as AddIcon, Edit as EditIcon } from '@mui/icons-material';
-import { Box, Button, Checkbox, Dialog, DialogActions, DialogContent, DialogTitle, Divider, FormControl, IconButton, InputLabel, List, ListItemButton, ListItemText, MenuItem, Select, Stack, TextField, Tooltip, Typography } from '@mui/material';
+import GpsFixedIcon from '@mui/icons-material/GpsFixed';
+import { Box, Button, Checkbox, Dialog, DialogActions, DialogContent, DialogTitle, Divider, FormControl, IconButton, InputLabel, List, ListItem, ListItemButton, ListItemText, MenuItem, Select, Stack, TextField, Tooltip, Typography } from '@mui/material';
 import { context } from './state';
 
 function percentLabel(value: number): string {
@@ -61,6 +62,12 @@ export const OperationPanel = observer(() => {
     setEditorName(operation.name);
     setEditorCropNames(operation.metadata.crops);
     setEditorOpen(true);
+  };
+
+  const handleShowFieldOnMap = (event: React.MouseEvent<HTMLButtonElement>, fieldName: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    actions.showFieldOnMap(fieldName);
   };
 
   return (
@@ -175,27 +182,39 @@ export const OperationPanel = observer(() => {
             <List dense disablePadding>
               {completedFieldStates
                 .map(fieldState => (
-                  <ListItemButton key={`completed-${fieldState.field.name}`} onClick={() => actions.openFieldModal(fieldState.field.name)}>
-                    <ListItemText
-                      primary={fieldState.field.name}
-                      secondaryTypographyProps={{ component: 'div' }}
-                      secondary={(
-                        <Stack spacing={0.25}>
-                          <Typography variant="body2" color="text.secondary">
-                            {`Completed ${fieldState.completion?.date || ''}`}
-                          </Typography>
-                          <Typography variant="body2" color="text.secondary">
-                            {`${fieldState.field.acreage.toFixed(2)} ac`}
-                          </Typography>
-                          {fieldState.completion?.rawPairs.length ? (
+                  <ListItem
+                    key={`completed-${fieldState.field.name}`}
+                    disablePadding
+                    secondaryAction={(
+                      <Tooltip title={`Show ${fieldState.field.name} on map`}>
+                        <IconButton edge="end" aria-label={`Show ${fieldState.field.name} on map`} onClick={(event) => handleShowFieldOnMap(event, fieldState.field.name)}>
+                          <GpsFixedIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    )}
+                  >
+                    <ListItemButton sx={{ pr: 7 }} onClick={() => actions.openFieldModal(fieldState.field.name)}>
+                      <ListItemText
+                        primary={fieldState.field.name}
+                        secondaryTypographyProps={{ component: 'div' }}
+                        secondary={(
+                          <Stack spacing={0.25}>
                             <Typography variant="body2" color="text.secondary">
-                              {fieldState.completion.rawPairs.map(pair => `${pair.key}: ${pair.value}`).join(' • ')}
+                              {`Completed ${fieldState.completion?.date || ''}`}
                             </Typography>
-                          ) : null}
-                        </Stack>
-                      )}
-                    />
-                  </ListItemButton>
+                            <Typography variant="body2" color="text.secondary">
+                              {`${fieldState.field.acreage.toFixed(2)} ac`}
+                            </Typography>
+                            {fieldState.completion?.rawPairs.length ? (
+                              <Typography variant="body2" color="text.secondary">
+                                {fieldState.completion.rawPairs.map(pair => `${pair.key}: ${pair.value}`).join(' • ')}
+                              </Typography>
+                            ) : null}
+                          </Stack>
+                        )}
+                      />
+                    </ListItemButton>
+                  </ListItem>
                 ))}
               {completedFieldStates.length < 1 && (
                 <Typography variant="body2" color="text.secondary">
@@ -215,12 +234,24 @@ export const OperationPanel = observer(() => {
               {operation.fieldStates
                 .filter(fieldState => fieldState.status === 'planned')
                 .map(fieldState => (
-                  <ListItemButton key={`planned-${fieldState.field.name}`} onClick={() => actions.openFieldModal(fieldState.field.name)}>
-                    <ListItemText
-                      primary={fieldState.field.name}
-                      secondary={`${fieldState.field.acreage.toFixed(2)} ac`}
-                    />
-                  </ListItemButton>
+                  <ListItem
+                    key={`planned-${fieldState.field.name}`}
+                    disablePadding
+                    secondaryAction={(
+                      <Tooltip title={`Show ${fieldState.field.name} on map`}>
+                        <IconButton edge="end" aria-label={`Show ${fieldState.field.name} on map`} onClick={(event) => handleShowFieldOnMap(event, fieldState.field.name)}>
+                          <GpsFixedIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    )}
+                  >
+                    <ListItemButton sx={{ pr: 7 }} onClick={() => actions.openFieldModal(fieldState.field.name)}>
+                      <ListItemText
+                        primary={fieldState.field.name}
+                        secondary={`${fieldState.field.acreage.toFixed(2)} ac`}
+                      />
+                    </ListItemButton>
+                  </ListItem>
                 ))}
               {operation.plannedFieldNames.length < 1 && (
                 <Typography variant="body2" color="text.secondary">

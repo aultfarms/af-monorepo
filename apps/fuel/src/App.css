@@ -265,6 +265,105 @@
   border: 1px solid #dce4f0;
 }
 
+.drive-export-card {
+  margin-top: 18px;
+  padding: 18px;
+  border-radius: 16px;
+  border: 1px solid #dce4f0;
+  background: #f8fbff;
+}
+
+.export-status-box {
+  margin-top: 16px;
+}
+
+.loading-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.small-spinner {
+  width: 20px;
+  height: 20px;
+  margin-top: 0;
+  flex: 0 0 auto;
+}
+
+.export-selection-stack {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.export-file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.export-file-list.compact {
+  margin-top: 10px;
+}
+
+.export-file-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid #dce4f0;
+  background: white;
+}
+
+.export-file-list.compact li {
+  padding: 10px 12px;
+}
+
+.export-file-list li.target {
+  border-color: #8eb4ec;
+  background: #eef6ff;
+}
+
+.export-file-name {
+  overflow-wrap: anywhere;
+  font-family:
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Monaco,
+    Consolas,
+    "Liberation Mono",
+    "Courier New",
+    monospace;
+}
+
+.export-file-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  white-space: nowrap;
+  background: #dcecff;
+  color: #17477c;
+}
+
+.manual-upload-divider {
+  margin: 20px 0 12px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #5d6c86;
+}
+
 .report-feedback-stack {
   display: flex;
   flex-direction: column;
@@ -306,6 +405,12 @@
 
 .compact-info-grid {
   margin-top: 12px;
+}
+
+.loaded-source-files {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(23, 71, 124, 0.14);
 }
 
 .transactions-details {

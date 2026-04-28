@@ -3,6 +3,8 @@ import {
   assertDrivers,
   assertFields,
   assertLoadsRecords,
+  assertSpreadRegionAssignments,
+  assertSpreadRegions,
   assertSources,
   deleteAccessRecord as removeAccessRecord,
   emptyLoadRecord,
@@ -10,9 +12,14 @@ import {
   isAccessEnabled,
   listAccessRecords,
   loadManureAppData,
+  nominalFieldAcreage,
   saveAccessRecord as persistAccessRecord,
+  saveDrivers as persistDrivers,
   saveFields as persistFields,
   saveLoadRecord,
+  saveSpreadRegionAssignments as persistSpreadRegionAssignments,
+  saveSpreadRegions as persistSpreadRegions,
+  saveSources as persistSources,
   type AccessRecord,
   type Driver,
   type Field,
@@ -21,6 +28,8 @@ import {
   type LoadsRecordGeoJSON,
   type LoadsRecordGeoJSONProps,
   type Source,
+  type SpreadRegion,
+  type SpreadRegionAssignment,
 } from '@aultfarms/manure';
 import { getCurrentUser, signInWithGoogle, signOutBrowserUser } from '@aultfarms/firebase';
 import type { Feature, FeatureCollection, MultiPolygon, Point, Polygon } from 'geojson';
@@ -31,6 +40,7 @@ import bbox from '@turf/bbox';
 import center from '@turf/center';
 import { point } from '@turf/helpers';
 import debug from 'debug';
+import { summarizeLoadGroupsByKey } from '../loadGroups';
 import { state, type State } from './state';
 
 const info = debug('af/manure:info');
@@ -41,11 +51,39 @@ function createLoadPoint(current: State['currentGPS']): Feature<Point> {
 }
 
 function refreshStoredLoadRecord(): void {
-  localStorage.setItem('af.manure.loadRecord', JSON.stringify(state.load));
+  localStorage.setItem('af.manure.loadRecord', JSON.stringify({
+    field: state.load.field,
+    source: state.load.source,
+    driver: state.load.driver,
+  }));
 }
 
 function currentActorEmail(): string {
   return state.auth.email || 'unknown@local';
+}
+
+function drawHeadingStorageKey(fieldName: string): string {
+  return `af.manure.drawHeading.${normalizedName(fieldName)}`;
+}
+
+function storedFieldHeading(fieldName: string): number | null {
+  const rawValue = localStorage.getItem(drawHeadingStorageKey(fieldName));
+  if (!rawValue) {
+    return null;
+  }
+
+  const headingDegrees = Number.parseFloat(rawValue);
+  return Number.isFinite(headingDegrees) ? headingDegrees : null;
+}
+
+function persistFieldHeading(fieldName: string, headingDegrees: number | null): void {
+  const storageKey = drawHeadingStorageKey(fieldName);
+  if (headingDegrees === null) {
+    localStorage.removeItem(storageKey);
+    return;
+  }
+
+  localStorage.setItem(storageKey, String(headingDegrees));
 }
 
 function nextBlankLoad(): LoadsRecord {
@@ -75,12 +113,112 @@ function nextBlankAccessDraft(): State['accessManagement']['draft'] {
   };
 }
 
+function nextBlankSourceDraft(): State['lookupManagement']['sourceDraft'] {
+  return {
+    name: '',
+    type: 'solid',
+    acPerLoad: '',
+    spreadWidthFeet: '40',
+    defaultLoadLengthFeet: '500',
+  };
+}
+
+function nextBlankDriverDraft(): State['lookupManagement']['driverDraft'] {
+  return {
+    name: '',
+  };
+}
+
 function sortManagedAccessRecords(records: AccessRecord[]): AccessRecord[] {
   return [ ...records ].sort((left, right) => left.email.localeCompare(right.email));
 }
 
 function normalizedEmail(email: string): string {
   return email.trim().toLowerCase();
+}
+
+function normalizedName(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+function sourceRecordKey(source: Pick<Source, 'id' | 'name'>): string {
+  return source.id || normalizedName(source.name);
+}
+
+function driverRecordKey(driver: Pick<Driver, 'id' | 'name'>): string {
+  return driver.id || normalizedName(driver.name);
+}
+
+function cloneSources(sourcesList: Source[]): Source[] {
+  return sourcesList.map(source => ({ ...source }));
+}
+
+function cloneRegions(regionsList: SpreadRegion[]): SpreadRegion[] {
+  return regionsList.map(region => ({
+    ...region,
+    polygon: {
+      ...region.polygon,
+      geometry: region.polygon.geometry,
+    },
+    centerline: region.centerline
+      ? {
+          ...region.centerline,
+          geometry: region.centerline.geometry,
+        }
+      : undefined,
+  }));
+}
+
+function cloneRegionAssignments(assignmentsList: SpreadRegionAssignment[]): SpreadRegionAssignment[] {
+  return assignmentsList.map(assignment => ({ ...assignment }));
+}
+
+function cloneDrivers(driversList: Driver[]): Driver[] {
+  return driversList.map(driver => ({ ...driver }));
+}
+
+function validateManagedSources(sourcesList: Source[]): string | null {
+  const seen = new Set<string>();
+  for (const source of sourcesList) {
+    const name = source.name.trim();
+    if (!name) {
+      return 'Source name cannot be empty.';
+    }
+    const key = normalizedName(name);
+    if (seen.has(key)) {
+      return `Source "${name}" already exists.`;
+    }
+    seen.add(key);
+    if (source.type !== 'solid' && source.type !== 'liquid') {
+      return `Source "${name}" must be solid or liquid.`;
+    }
+    if (!Number.isFinite(source.acPerLoad)) {
+      return `Source "${name}" must have a valid acres-per-load value.`;
+    }
+    if (!Number.isFinite(source.spreadWidthFeet) || (source.spreadWidthFeet || 0) <= 0) {
+      return `Source \"${name}\" must have a valid spread width in feet.`;
+    }
+    if (!Number.isFinite(source.defaultLoadLengthFeet) || (source.defaultLoadLengthFeet || 0) <= 0) {
+      return `Source \"${name}\" must have a valid default load length in feet.`;
+    }
+  }
+  return null;
+}
+
+function validateManagedDrivers(driversList: Driver[]): string | null {
+  const seen = new Set<string>();
+  for (const driver of driversList) {
+    const name = driver.name.trim();
+    if (!name) {
+      return 'Driver name cannot be empty.';
+    }
+    const key = normalizedName(name);
+    if (seen.has(key)) {
+      return `Driver "${name}" already exists.`;
+    }
+    seen.add(key);
+  }
+  return null;
 }
 
 function isCurrentUserAccessRecord(email: string): boolean {
@@ -213,9 +351,44 @@ export const accessManagementState = action('accessManagementState', (accessMana
   };
 });
 
+export const historyManagementState = action('historyManagementState', (historyManagement: Partial<State['historyManagement']>) => {
+  state.historyManagement = {
+    ...state.historyManagement,
+    ...historyManagement,
+  };
+});
+
+export const drawState = action('drawState', (draw: Partial<State['draw']>) => {
+  state.draw = {
+    ...state.draw,
+    ...draw,
+  };
+});
+
 export const accessManagementDraft = action('accessManagementDraft', (draft: Partial<State['accessManagement']['draft']>) => {
   state.accessManagement.draft = {
     ...state.accessManagement.draft,
+    ...draft,
+  };
+});
+
+export const lookupManagementState = action('lookupManagementState', (lookupManagement: Partial<State['lookupManagement']>) => {
+  state.lookupManagement = {
+    ...state.lookupManagement,
+    ...lookupManagement,
+  };
+});
+
+export const sourceManagementDraft = action('sourceManagementDraft', (draft: Partial<State['lookupManagement']['sourceDraft']>) => {
+  state.lookupManagement.sourceDraft = {
+    ...state.lookupManagement.sourceDraft,
+    ...draft,
+  };
+});
+
+export const driverManagementDraft = action('driverManagementDraft', (draft: Partial<State['lookupManagement']['driverDraft']>) => {
+  state.lookupManagement.driverDraft = {
+    ...state.lookupManagement.driverDraft,
     ...draft,
   };
 });
@@ -233,6 +406,28 @@ export const updateManagedAccessRecord = action('updateManagedAccessRecord', (em
   );
 });
 
+export const updateManagedSource = action('updateManagedSource', (key: string, patch: Partial<Source>) => {
+  state.lookupManagement.sources = state.lookupManagement.sources.map(source =>
+    sourceRecordKey(source) === key
+      ? {
+          ...source,
+          ...patch,
+        }
+      : source,
+  );
+});
+
+export const updateManagedDriver = action('updateManagedDriver', (key: string, patch: Partial<Driver>) => {
+  state.lookupManagement.drivers = state.lookupManagement.drivers.map(driver =>
+    driverRecordKey(driver) === key
+      ? {
+          ...driver,
+          ...patch,
+        }
+      : driver,
+  );
+});
+
 export const online = action('online', (isOnline: boolean) => {
   state.network.online = isOnline;
 });
@@ -242,9 +437,26 @@ export const resetSessionData = action('resetSessionData', () => {
   sources([]);
   drivers([]);
   loads([]);
+  previousLoads([]);
+  regions([]);
+  regionAssignments([]);
   state.load = nextBlankLoad();
   refreshStoredLoadRecord();
   fieldsChanged(false);
+  historyManagementState({
+    modalOpen: false,
+    selectedLoadGroupKeys: [],
+  });
+  drawState({
+    enabled: false,
+    modalOpen: false,
+    saving: false,
+    mode: 'load',
+    targetLoadGroupKeys: [],
+    targetField: '',
+    headingDegrees: null,
+    useDefaultFieldHeading: true,
+  });
 });
 
 export const startSignIn = action('startSignIn', async () => {
@@ -375,6 +587,7 @@ export const uploadKMZ = action('uploadKMZ', async (file: File) => {
     const existing = nextFields.find(existingField => existingField.name === field.name);
     if (existing) {
       existing.name = field.name;
+      existing.acreage = field.acreage;
       existing.boundary = field.boundary;
     } else {
       nextFields.push(field);
@@ -403,7 +616,7 @@ export const saveFields = action('saveFields', async () => {
   }
 });
 
-export async function parseKMZIntoFields(file: File): Promise<{ name: string; boundary: Field['boundary'] }[]> {
+export async function parseKMZIntoFields(file: File): Promise<Array<Pick<Field, 'name' | 'acreage' | 'boundary'>>> {
   const arrayBuffer = await file.arrayBuffer();
   const zip = await JSZip.loadAsync(arrayBuffer);
   const kmlFile = Object.values(zip.files).find(candidate => candidate.name.endsWith('.kml'));
@@ -420,6 +633,7 @@ export async function parseKMZIntoFields(file: File): Promise<{ name: string; bo
     .filter(feature => feature.geometry?.type === 'Polygon' || feature.geometry?.type === 'MultiPolygon')
     .map(feature => ({
       name: feature.properties?.name || 'Unnamed Field',
+      acreage: nominalFieldAcreage(feature.properties?.name || 'Unnamed Field', feature as Feature<Polygon | MultiPolygon>),
       boundary: feature as Feature<Polygon | MultiPolygon>,
     }));
 }
@@ -439,6 +653,7 @@ export const fieldName = action('fieldName', (oldName: string, newName: string) 
   if (fieldIndex >= 0) {
     fieldsChanged(true);
     state.fields[fieldIndex]!.name = newName;
+    state.fields[fieldIndex]!.acreage = nominalFieldAcreage(newName, state.fields[fieldIndex]!.boundary);
   }
 });
 
@@ -447,6 +662,7 @@ export const fieldBoundary = action('fieldBoundary', (name: string, boundary: Fi
   if (fieldIndex >= 0) {
     fieldsChanged(true);
     state.fields[fieldIndex]!.boundary = boundary;
+    state.fields[fieldIndex]!.acreage = nominalFieldAcreage(state.fields[fieldIndex]!.name, boundary);
   } else {
     info('Could not find field with name %s', name);
   }
@@ -485,9 +701,6 @@ export const saveLoad = action('saveLoad', async () => {
   }
 });
 
-export const toggleConfigModal = action('toggleConfigModal', () => {
-  state.config.modalOpen = !state.config.modalOpen;
-});
 
 export const closeAccessManagementModal = action('closeAccessManagementModal', () => {
   accessManagementState({
@@ -666,10 +879,18 @@ export const geojsonFields = action('geojsonFields', (geojson?: FeatureCollectio
 
 export const sources = action('sources', (nextSources: Source[]) => {
   state.sources = nextSources;
+  if (state.load.source && !nextSources.some(source => source.name === state.load.source)) {
+    state.load.source = '';
+    refreshStoredLoadRecord();
+  }
 });
 
 export const drivers = action('drivers', (nextDrivers: Driver[]) => {
   state.drivers = nextDrivers;
+  if (state.load.driver && !nextDrivers.some(driver => driver.name === state.load.driver)) {
+    state.load.driver = '';
+    refreshStoredLoadRecord();
+  }
 });
 
 export const loads = action('loads', (nextLoads: LoadsRecord[]) => {
@@ -692,6 +913,10 @@ export const loads = action('loads', (nextLoads: LoadsRecord[]) => {
   geojsonLoads(geojson);
 });
 
+export const previousLoads = action('previousLoads', (nextPreviousLoads: LoadsRecord[]) => {
+  state.previousLoads = nextPreviousLoads;
+});
+
 let cachedGeojsonLoads: FeatureCollection<Point, LoadsRecordGeoJSONProps> = { type: 'FeatureCollection', features: [] };
 export const geojsonLoads = action('geojsonLoads', (geojson?: FeatureCollection<Point, LoadsRecordGeoJSONProps>) => {
   if (geojson) {
@@ -700,6 +925,40 @@ export const geojsonLoads = action('geojsonLoads', (geojson?: FeatureCollection<
   }
   return cachedGeojsonLoads;
 });
+
+let cachedGeojsonRegions: FeatureCollection<Polygon | MultiPolygon, { id?: string; field: string; mode: SpreadRegion['mode'] }> = {
+  type: 'FeatureCollection',
+  features: [],
+};
+export const regions = action('regions', (nextRegions: SpreadRegion[]) => {
+  state.regions = nextRegions;
+  geojsonRegions({
+    type: 'FeatureCollection',
+    features: nextRegions.map(region => ({
+      ...region.polygon,
+      properties: {
+        id: region.id,
+        field: region.field,
+        mode: region.mode,
+      },
+    })),
+  });
+});
+
+export const regionAssignments = action('regionAssignments', (nextAssignments: SpreadRegionAssignment[]) => {
+  state.regionAssignments = nextAssignments;
+});
+
+export const geojsonRegions = action(
+  'geojsonRegions',
+  (geojson?: FeatureCollection<Polygon | MultiPolygon, { id?: string; field: string; mode: SpreadRegion['mode'] }>) => {
+    if (geojson) {
+      cachedGeojsonRegions = geojson;
+      state.geojsonRegions.rev += 1;
+    }
+    return cachedGeojsonRegions;
+  },
+);
 
 
 export const retrySessionLoad = action('retrySessionLoad', async (userOverride?: ReturnType<typeof getCurrentUser>) => {
@@ -755,6 +1014,183 @@ export const openAccessManagementModal = action('openAccessManagementModal', asy
     draft: nextBlankAccessDraft(),
   });
   await loadAccessManagementRecords();
+});
+
+export const openHistoryModal = action('openHistoryModal', () => {
+  historyManagementState({ modalOpen: true });
+});
+
+export const closeHistoryModal = action('closeHistoryModal', () => {
+  historyManagementState({ modalOpen: false });
+});
+
+export const openSourceManagementModal = action('openSourceManagementModal', () => {
+  if (!state.auth.admin) {
+    snackbarMessage('Only admins can manage sources.');
+    return;
+  }
+
+  lookupManagementState({
+    sourceModalOpen: true,
+    driverModalOpen: false,
+    saving: false,
+    sources: cloneSources(state.sources),
+    drivers: [],
+    sourceDraft: nextBlankSourceDraft(),
+    driverDraft: nextBlankDriverDraft(),
+  });
+});
+
+export const closeSourceManagementModal = action('closeSourceManagementModal', () => {
+  lookupManagementState({
+    sourceModalOpen: false,
+    driverModalOpen: false,
+    saving: false,
+    sources: [],
+    drivers: [],
+    sourceDraft: nextBlankSourceDraft(),
+    driverDraft: nextBlankDriverDraft(),
+  });
+});
+
+export const openDriverManagementModal = action('openDriverManagementModal', () => {
+  if (!state.auth.admin) {
+    snackbarMessage('Only admins can manage drivers.');
+    return;
+  }
+
+  lookupManagementState({
+    sourceModalOpen: false,
+    driverModalOpen: true,
+    saving: false,
+    sources: [],
+    drivers: cloneDrivers(state.drivers),
+    sourceDraft: nextBlankSourceDraft(),
+    driverDraft: nextBlankDriverDraft(),
+  });
+});
+
+export const closeDriverManagementModal = action('closeDriverManagementModal', () => {
+  lookupManagementState({
+    sourceModalOpen: false,
+    driverModalOpen: false,
+    saving: false,
+    sources: [],
+    drivers: [],
+    sourceDraft: nextBlankSourceDraft(),
+    driverDraft: nextBlankDriverDraft(),
+  });
+});
+
+export const addManagedSource = action('addManagedSource', () => {
+  if (!state.auth.admin) {
+    snackbarMessage('Only admins can manage sources.');
+    return;
+  }
+
+  const acPerLoad = Number.parseFloat(state.lookupManagement.sourceDraft.acPerLoad);
+  const nextSource: Source = {
+    name: state.lookupManagement.sourceDraft.name.trim(),
+    type: state.lookupManagement.sourceDraft.type,
+    acPerLoad,
+  };
+  const validationError = validateManagedSources([ ...state.lookupManagement.sources, nextSource ]);
+  if (validationError) {
+    snackbarMessage(validationError);
+    return;
+  }
+
+  lookupManagementState({
+    sources: [ ...state.lookupManagement.sources, nextSource ].sort((left, right) => left.name.localeCompare(right.name)),
+    sourceDraft: nextBlankSourceDraft(),
+  });
+});
+
+export const deleteManagedSource = action('deleteManagedSource', (key: string) => {
+  state.lookupManagement.sources = state.lookupManagement.sources.filter(source => sourceRecordKey(source) !== key);
+});
+
+export const saveManagedSources = action('saveManagedSources', async () => {
+  if (!state.auth.admin) {
+    snackbarMessage('Only admins can manage sources.');
+    return;
+  }
+
+  const validationError = validateManagedSources(state.lookupManagement.sources);
+  if (validationError) {
+    snackbarMessage(validationError);
+    return;
+  }
+
+  lookupManagementState({ saving: true });
+  try {
+    const savedSources = await persistSources(state.thisYear, state.lookupManagement.sources, currentActorEmail());
+    sources(savedSources);
+    lookupManagementState({
+      sources: cloneSources(savedSources),
+      sourceDraft: nextBlankSourceDraft(),
+    });
+    snackbarMessage('Sources saved');
+  } catch (error) {
+    warn('Error saving manure sources. Error=%O', error);
+    snackbarMessage(`Error saving sources: ${(error as Error).message}`);
+  } finally {
+    lookupManagementState({ saving: false });
+  }
+});
+
+export const addManagedDriver = action('addManagedDriver', () => {
+  if (!state.auth.admin) {
+    snackbarMessage('Only admins can manage drivers.');
+    return;
+  }
+
+  const nextDriver: Driver = {
+    name: state.lookupManagement.driverDraft.name.trim(),
+  };
+  const validationError = validateManagedDrivers([ ...state.lookupManagement.drivers, nextDriver ]);
+  if (validationError) {
+    snackbarMessage(validationError);
+    return;
+  }
+
+  lookupManagementState({
+    drivers: [ ...state.lookupManagement.drivers, nextDriver ].sort((left, right) => left.name.localeCompare(right.name)),
+    driverDraft: nextBlankDriverDraft(),
+  });
+});
+
+export const deleteManagedDriver = action('deleteManagedDriver', (key: string) => {
+  state.lookupManagement.drivers = state.lookupManagement.drivers.filter(driver => driverRecordKey(driver) !== key);
+});
+
+export const saveManagedDrivers = action('saveManagedDrivers', async () => {
+  if (!state.auth.admin) {
+    snackbarMessage('Only admins can manage drivers.');
+    return;
+  }
+
+  const validationError = validateManagedDrivers(state.lookupManagement.drivers);
+  if (validationError) {
+    snackbarMessage(validationError);
+    return;
+  }
+
+  lookupManagementState({ saving: true });
+  try {
+    const savedDrivers = await persistDrivers(state.thisYear, state.lookupManagement.drivers, currentActorEmail());
+    drivers(savedDrivers);
+    lookupManagementState({
+      drivers: cloneDrivers(savedDrivers),
+      driverDraft: nextBlankDriverDraft(),
+    });
+    snackbarMessage('Drivers saved');
+  } catch (error) {
+    warn('Error saving manure drivers. Error=%O', error);
+    snackbarMessage(`Error saving drivers: ${(error as Error).message}`);
+  } finally {
+    lookupManagementState({ saving: false });
+  }
 });
 
 export const createManagedAccessRecord = action('createManagedAccessRecord', async () => {

@@ -33,8 +33,8 @@ export const NavBar = observer(() => {
         <Typography variant="body2" sx={{ display: { xs: 'none', md: 'block' } }}>
           {contextLabel}
         </Typography>
-        <Tooltip title="Fit all fields">
-          <IconButton color="inherit" onClick={actions.fitAllFields}>
+        <Tooltip title="Locate me">
+          <IconButton color="inherit" onClick={actions.locateMeOnMap}>
             <GpsFixedIcon />
           </IconButton>
         </Tooltip>
@@ -61,7 +61,7 @@ export const NavBar = observer(() => {
           <MenuItem disabled={state.mode === 'options_manager'} onClick={() => { actions.mode('options_manager'); setAnchorEl(null); }}>
             Options Manager
           </MenuItem>
-          <MenuItem onClick={() => { actions.fitAllFields(); setAnchorEl(null); }}>
+          <MenuItem onClick={() => { actions.showAllFieldsOnMap(); setAnchorEl(null); }}>
             Fit all fields
           </MenuItem>
           <MenuItem onClick={() => { actions.loadBoard(true); setAnchorEl(null); }}>
@@ -70,8 +70,8 @@ export const NavBar = observer(() => {
           <MenuItem onClick={() => { actions.openIssuesModal(); setAnchorEl(null); }}>
             {`Issues${issueCount > 0 ? ` (${issueCount})` : ''}`}
           </MenuItem>
-          <MenuItem onClick={() => { actions.logoutTrello(); setAnchorEl(null); }}>
-            Sign out
+          <MenuItem onClick={() => { void actions.openAuthScreen(); setAnchorEl(null); }}>
+            Login/Logout
           </MenuItem>
         </Menu>
       </Toolbar>

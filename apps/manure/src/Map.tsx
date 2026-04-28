@@ -2,7 +2,8 @@ import React, { useEffect } from 'react';
 import { observer } from 'mobx-react-lite';
 import { context } from './state';
 import { MapContainer, TileLayer, Marker, Popup, useMapEvents, useMap, GeoJSON } from 'react-leaflet';
-import { Typography } from '@mui/material';
+import { IconButton, Tooltip, Typography } from '@mui/material';
+import ZoomOutMapIcon from '@mui/icons-material/ZoomOutMap';
 import L from 'leaflet';
 import debug from 'debug';
 import type { Feature, Geometry } from 'geojson';
@@ -122,6 +123,25 @@ export const Map = observer(() => {
       <Typography sx={{ position: 'absolute', top: '10px', left: '10px', background: 'rgba(255, 255, 255, 0.7)', padding: '5px', zIndex: 1000 }}>
         Field: {state.load.field || 'None'} | Source: {state.load.source || 'None'} | Today: {todayLoads} | Season: {seasonLoads}
       </Typography>
+      <Tooltip title="Zoom to selected field">
+        <span
+          style={{
+            position: 'absolute',
+            right: '12px',
+            bottom: '12px',
+            zIndex: 1000,
+          }}
+        >
+          <IconButton
+            aria-label="zoom to selected field"
+            onClick={() => actions.moveMapToField(state.load.field)}
+            disabled={!state.load.field}
+            sx={{ bgcolor: 'rgba(255, 255, 255, 0.85)' }}
+          >
+            <ZoomOutMapIcon />
+          </IconButton>
+        </span>
+      </Tooltip>
       {state.gpsMode === 'map' && (
         <Typography
           sx={{

@@ -7,6 +7,7 @@ import {
   deleteOperationCompletion,
   defaultFieldAreaAcres,
   type FieldBoundary,
+  fieldWorkTrelloConfig,
   fieldWorkBoard,
   normalizeFieldReference,
   removeFieldFromOperationExclude,
@@ -26,10 +27,17 @@ import {
   type OperationOption,
   type OperationOptionInput,
 } from '@aultfarms/field-work';
-import { parseKMZIntoEditableFields, mapViewForBoundary, mapViewForFields } from '../util';
+import { boundsForBoundary, boundsForFields, boundsForPoint, extendBoundsToIncludePoint, parseKMZIntoEditableFields } from '../util';
 import { state, type AppIssue, type EditableCrop, type EditableField, type EditableOption, type FieldModalAction, type State } from './state';
 
 const info = debug('af/field-work:info');
+const trelloPublicApiKey = '3ad06cb25802014a3f24f479e886771c';
+const trelloTokenStorageKey = 'trello_token';
+const fieldWorkLocalStorageKeys = [
+  'af.field-work.map',
+  'af.field-work.operation',
+  'af.field-work.operation-options',
+] as const;
 
 function persistMapView(): void {
   localStorage.setItem('af.field-work.map', JSON.stringify(state.mapView));
@@ -37,6 +45,83 @@ function persistMapView(): void {
 
 function persistSelectedOperation(): void {
   localStorage.setItem('af.field-work.operation', state.selectedOperationName);
+}
+
+function scrollMapElementIntoView(): void {
+  if (typeof document === 'undefined') {
+    return;
+  }
+  const mapElement = document.getElementById('field-work-map');
+  if (mapElement) {
+    mapElement.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start',
+    });
+  }
+}
+
+function queueMapBounds(nextBounds: State['mapBounds']): void {
+  state.mapBounds = nextBounds;
+  state.mapCommandId += 1;
+}
+
+function boundsIncludingCurrentLocation(nextBounds: State['mapBounds']): State['mapBounds'] {
+  if (!state.currentLocation) {
+    return nextBounds;
+  }
+  return extendBoundsToIncludePoint(nextBounds, state.currentLocation.center);
+}
+
+function readStoredTrelloToken(): string {
+  try {
+    return localStorage.getItem(trelloTokenStorageKey) || '';
+  } catch (error) {
+    void error;
+    return '';
+  }
+}
+
+function clearFieldWorkLocalCache(): void {
+  try {
+    fieldWorkLocalStorageKeys.forEach(key => localStorage.removeItem(key));
+  } catch (error) {
+    void error;
+  }
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+async function fetchTrelloJson<T>(path: string, token: string, params: Record<string, string | number | boolean> = {}): Promise<T> {
+  const url = new URL(`https://api.trello.com/1${path.startsWith('/') ? path : `/${path}`}`);
+  url.searchParams.set('key', trelloPublicApiKey);
+  url.searchParams.set('token', token);
+  Object.entries(params).forEach(([key, value]) => {
+    url.searchParams.set(key, `${value}`);
+  });
+
+  const response = await fetch(url.toString(), { method: 'GET' });
+  const responseText = await response.text();
+  if (!response.ok) {
+    let message = `${response.status} ${response.statusText}`;
+    if (responseText) {
+      try {
+        const body = JSON.parse(responseText) as { message?: string };
+        if (typeof body.message === 'string' && body.message.trim()) {
+          message = `${message}: ${body.message}`;
+        }
+      } catch (error) {
+        void error;
+      }
+    }
+    throw new Error(message);
+  }
+
+  if (!responseText) {
+    return {} as T;
+  }
+  return JSON.parse(responseText) as T;
 }
 
 function readStoredOperationOptionDefaults(): Record<string, CompletionValues> {
@@ -320,8 +405,135 @@ export const loadingError = action('loadingError', (message: string) => {
   }
 });
 
+export const clearTrelloDiagnostics = action('clearTrelloDiagnostics', () => {
+  state.trelloDiagnostics = {
+    loading: false,
+    error: '',
+    tokenStorageKey: trelloTokenStorageKey,
+    tokenPresent: !!readStoredTrelloToken(),
+    expectedOrgName: trellolib.defaultOrg,
+    expectedBoardName: fieldWorkTrelloConfig.board,
+    user: null,
+    organizations: [],
+    defaultOrganizationFound: false,
+    defaultOrganizationId: '',
+    boardsInDefaultOrganization: [],
+  };
+});
+
+export const loadTrelloDiagnostics = action('loadTrelloDiagnostics', async () => {
+  const token = readStoredTrelloToken();
+  runInAction(() => {
+    state.trelloDiagnostics = {
+      loading: true,
+      error: '',
+      tokenStorageKey: trelloTokenStorageKey,
+      tokenPresent: !!token,
+      expectedOrgName: trellolib.defaultOrg,
+      expectedBoardName: fieldWorkTrelloConfig.board,
+      user: null,
+      organizations: [],
+      defaultOrganizationFound: false,
+      defaultOrganizationId: '',
+      boardsInDefaultOrganization: [],
+    };
+  });
+
+  if (!token) {
+    runInAction(() => {
+      state.trelloDiagnostics.loading = false;
+      state.trelloDiagnostics.error = 'No Trello token was found in localStorage.';
+    });
+    return;
+  }
+
+  try {
+    const rawUser = await fetchTrelloJson<Record<string, unknown>>('/members/me', token, { fields: 'all' });
+    const rawOrganizations = await fetchTrelloJson<Array<Record<string, unknown>>>('/members/me/organizations', token, { fields: 'id,name,displayName' });
+    const organizations = rawOrganizations.map(org => ({
+      id: stringValue(org.id),
+      name: stringValue(org.name),
+      displayName: stringValue(org.displayName),
+    }));
+    const defaultOrganization = organizations.find(org => org.displayName === trellolib.defaultOrg || org.name === trellolib.defaultOrg) || null;
+    let boardsInDefaultOrganization: State['trelloDiagnostics']['boardsInDefaultOrganization'] = [];
+    if (defaultOrganization?.id) {
+      const rawBoards = await fetchTrelloJson<Array<Record<string, unknown>>>(`/organizations/${defaultOrganization.id}/boards`, token, { fields: 'id,name,closed,url' });
+      boardsInDefaultOrganization = rawBoards.map(board => ({
+        id: stringValue(board.id),
+        name: stringValue(board.name),
+        closed: !!board.closed,
+        url: stringValue(board.url),
+      }));
+    }
+
+    const email = stringValue(rawUser.email) || stringValue(rawUser.aaEmail);
+    runInAction(() => {
+      state.trelloDiagnostics = {
+        loading: false,
+        error: '',
+        tokenStorageKey: trelloTokenStorageKey,
+        tokenPresent: true,
+        expectedOrgName: trellolib.defaultOrg,
+        expectedBoardName: fieldWorkTrelloConfig.board,
+        user: {
+          id: stringValue(rawUser.id),
+          username: stringValue(rawUser.username),
+          fullName: stringValue(rawUser.fullName),
+          email,
+          url: stringValue(rawUser.url),
+        },
+        organizations,
+        defaultOrganizationFound: !!defaultOrganization,
+        defaultOrganizationId: defaultOrganization?.id || '',
+        boardsInDefaultOrganization,
+      };
+    });
+  } catch (error) {
+    runInAction(() => {
+      state.trelloDiagnostics.loading = false;
+      state.trelloDiagnostics.error = `Unable to load Trello diagnostics: ${(error as Error).message}`;
+    });
+  }
+});
+
+export const currentLocation = action('currentLocation', (nextLocation: State['currentLocation']) => {
+  state.currentLocation = nextLocation;
+});
+
+export const clearCurrentLocation = action('clearCurrentLocation', () => {
+  state.currentLocation = null;
+});
+
+export const locateMeOnMap = action('locateMeOnMap', () => {
+  if (!state.currentLocation) {
+    snackbarMessage('Current GPS location is not available yet');
+    return;
+  }
+  queueMapBounds(boundsForPoint(state.currentLocation.center));
+});
+
+export const showAllFieldsOnMap = action('showAllFieldsOnMap', () => {
+  fitAllFields();
+  scrollMapElementIntoView();
+});
+
+export const showFieldOnMap = action('showFieldOnMap', (fieldName: string) => {
+  moveMapToField(fieldName);
+  scrollMapElementIntoView();
+});
+
 export const setTrelloAuthorized = action('setTrelloAuthorized', (authorized: boolean) => {
   state.trelloAuthorized = authorized;
+});
+
+export const openAuthScreen = action('openAuthScreen', async () => {
+  state.authScreenOpen = true;
+  await loadTrelloDiagnostics();
+});
+
+export const closeAuthScreen = action('closeAuthScreen', () => {
+  state.authScreenOpen = false;
 });
 
 export const snackbarMessage = action('snackbarMessage', (message: string) => {
@@ -380,23 +592,45 @@ export const fitAllFields = action('fitAllFields', () => {
   const fields = state.mode === 'field_manager'
     ? state.fieldDrafts
     : (state.board?.fields || []).map(editableFieldFromDefinition);
-  const nextMapView = mapViewForFields(fields);
-  if (!nextMapView) {
+  const nextBounds = boundsIncludingCurrentLocation(boundsForFields(fields));
+  if (!nextBounds) {
     return;
   }
-  mapView(nextMapView);
+  queueMapBounds(nextBounds);
 });
 
 export const moveMapToField = action('moveMapToField', (fieldName: string) => {
   const managerField = state.fieldDrafts.find(field => field.name === fieldName) || null;
   if (managerField?.boundary) {
-    mapView(mapViewForBoundary(managerField.boundary));
+    queueMapBounds(boundsIncludingCurrentLocation(boundsForBoundary(managerField.boundary)));
     return;
   }
 
   const boardField = state.board?.fields.find(field => field.name === fieldName) || null;
   if (boardField?.boundary) {
-    mapView(mapViewForBoundary(boardField.boundary));
+    queueMapBounds(boundsIncludingCurrentLocation(boundsForBoundary(boardField.boundary)));
+  }
+});
+
+export const resetLocalCache = action('resetLocalCache', async () => {
+  clearFieldWorkLocalCache();
+  clearTrelloDiagnostics();
+  cachedTrelloClient = null;
+
+  try {
+    const client = trellolib.getClient();
+    await client.deauthorize();
+  } catch (error) {
+    void error;
+    try {
+      localStorage.removeItem(trelloTokenStorageKey);
+    } catch (storageError) {
+      void storageError;
+    }
+  } finally {
+    if (typeof window !== 'undefined') {
+      window.location.reload();
+    }
   }
 });
 
@@ -608,10 +842,34 @@ export const trello = action('trello', async () => {
 
 export const loginWithTrello = action('loginWithTrello', async () => {
   info('Logging in with Trello');
-  await trello();
+  loading(true);
+  loadingError('');
+  clearTrelloDiagnostics();
+
+  try {
+    await trello();
+    setTrelloAuthorized(true);
+    await loadBoard(true);
+    if (!state.board) {
+      throw new Error(state.loadingError || `Unable to load ${fieldWorkTrelloConfig.board}`);
+    }
+    closeAuthScreen();
+    clearTrelloDiagnostics();
+  } catch (error) {
+    setTrelloAuthorized(false);
+    loadingError(`Unable to initialize Field Work: ${(error as Error).message}`);
+    await loadTrelloDiagnostics();
+  } finally {
+    if (!state.board) {
+      loading(false);
+    }
+  }
 });
 
 export const logoutTrello = action('logoutTrello', async () => {
+  clearFieldWorkLocalCache();
+  clearTrelloDiagnostics();
+  cachedTrelloClient = null;
   try {
     const client = trellolib.getClient();
     await client.deauthorize();

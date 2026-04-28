@@ -298,6 +298,7 @@ __metadata:
     "@rollup/plugin-commonjs": "npm:^24.0.1"
     "@rollup/plugin-node-resolve": "npm:^15.0.1"
     "@tsconfig/node16": "npm:^1.0.3"
+    "@turf/area": "npm:^7.2.0"
     "@types/debug": "npm:^4.1.7"
     "@types/geojson": "npm:^7946.0.16"
     "@types/node": "npm:^17.0.14"
