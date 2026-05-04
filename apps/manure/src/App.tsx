@@ -9,6 +9,7 @@ import { AccessManagementModal } from './AccessManagementModal';
 import { HistoryModal } from './HistoryModal';
 import { SourceManagementModal } from './SourceManagementModal';
 import { DriverManagementModal } from './DriverManagementModal';
+import { DrawModal } from './DrawModal';
 import { BottomLoadButton } from './BottomLoadButton';
 import { LoadingIndicator } from './LoadingIndicator';
 import { context } from './state';
@@ -104,6 +105,7 @@ export const App = observer(() => {
       <HistoryModal />
       <SourceManagementModal />
       <DriverManagementModal />
+      <DrawModal />
       <div style={{ height: '3em' }} />
       <BottomLoadButton />
       <Snackbar

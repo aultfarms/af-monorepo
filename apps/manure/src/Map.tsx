@@ -7,6 +7,7 @@ import ZoomOutMapIcon from '@mui/icons-material/ZoomOutMap';
 import L from 'leaflet';
 import debug from 'debug';
 import type { Feature, Geometry } from 'geojson';
+import { createLoadGroupKey } from '@aultfarms/manure';
 
 import 'leaflet/dist/leaflet.css';
 import './Map.css';
@@ -69,6 +70,27 @@ const MapController = observer(() => {
 export const Map = observer(() => {
   const { state, actions } = React.useContext(context);
   const l = state.load;
+  const currentLoadGroupKey = state.load.date && state.load.field && state.load.source
+    ? createLoadGroupKey(state.load)
+    : '';
+  const selectedRegionIds = React.useMemo(() => {
+    const selectedGroupKeys = new Set([
+      ...state.historyManagement.selectedLoadGroupKeys,
+      ...state.draw.targetLoadGroupKeys,
+    ]);
+    return new Set(
+      state.regionAssignments
+        .filter(assignment => selectedGroupKeys.has(assignment.loadGroupKey))
+        .map(assignment => assignment.regionId),
+    );
+  }, [state.draw.targetLoadGroupKeys, state.historyManagement.selectedLoadGroupKeys, state.regionAssignments]);
+  const currentRegionIds = React.useMemo(() => (
+    new Set(
+      state.regionAssignments
+        .filter(assignment => assignment.loadGroupKey === currentLoadGroupKey)
+        .map(assignment => assignment.regionId),
+    )
+  ), [currentLoadGroupKey, state.regionAssignments]);
   const todayLoads = state.loads
     .filter(r => r.date === l.date && r.field === l.field && r.source === l.source)
     .reduce((sum, r) => sum + r.loads, 0);
@@ -104,6 +126,23 @@ export const Map = observer(() => {
         >
           <Popup>You are here</Popup>
         </Marker>
+
+        <GeoJSON
+          data={actions.geojsonRegions()}
+          style={(feature) => {
+            const regionId = feature?.properties?.id as string | undefined;
+            const isCurrent = !!regionId && currentRegionIds.has(regionId);
+            const isSelected = !!regionId && selectedRegionIds.has(regionId);
+            const isCurrentField = feature?.properties?.field === state.load.field;
+            return {
+              color: isCurrent ? '#e0a800' : isSelected ? '#d4b000' : '#cdbd63',
+              weight: isCurrent ? 3 : isSelected ? 2.5 : 1.5,
+              opacity: isCurrent || isSelected ? 0.95 : 0.7,
+              fillColor: '#fff4b8',
+              fillOpacity: isCurrent ? 0.5 : isSelected ? 0.38 : (isCurrentField ? 0.28 : 0.18),
+            };
+          }}
+        />
 
         <GeoJSON
           data={actions.geojsonFields()}

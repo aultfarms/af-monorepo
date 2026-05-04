@@ -13,6 +13,39 @@ function normalizeCropName(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function recordSummary(fieldState: NonNullable<ReturnType<typeof summarizeFieldState>>): React.ReactNode {
+  return (
+    <Stack spacing={0.25}>
+      <Typography variant="body2" color="text.secondary">
+        {`${fieldState.label} ${fieldState.date}`}
+      </Typography>
+      <Typography variant="body2" color="text.secondary">
+        {`${fieldState.acreage.toFixed(2)} ac`}
+      </Typography>
+      {fieldState.details ? (
+        <Typography variant="body2" color="text.secondary">
+          {fieldState.details}
+        </Typography>
+      ) : null}
+    </Stack>
+  );
+}
+
+function summarizeFieldState(fieldState: {
+  status: string;
+  field: { acreage: number };
+  completion: { date: string; rawPairs: Array<{ key: string; value: string }> } | null;
+}) {
+  return {
+    label: fieldState.status === 'started' ? 'Started' : 'Completed',
+    date: fieldState.completion?.date || '',
+    acreage: fieldState.field.acreage,
+    details: fieldState.completion?.rawPairs.length
+      ? fieldState.completion.rawPairs.map(pair => `${pair.key}: ${pair.value}`).join(' • ')
+      : '',
+  };
+}
+
 export const OperationPanel = observer(() => {
   const { state, actions } = React.useContext(context);
   const operations = state.board?.operations || [];
@@ -37,15 +70,19 @@ export const OperationPanel = observer(() => {
   const [editorMode, setEditorMode] = React.useState<'create' | 'edit'>('create');
   const [editorName, setEditorName] = React.useState('');
   const [editorCropNames, setEditorCropNames] = React.useState<string[]>([]);
-  const completedFieldStates = operation
+  const recordFieldStates = operation
     ? operation.fieldStates
-      .filter(fieldState => fieldState.status === 'completed' && !!fieldState.completion)
+      .filter(fieldState => (fieldState.status === 'started' || fieldState.status === 'completed') && !!fieldState.completion)
       .sort((left, right) =>
         (right.completion?.date || '').localeCompare(left.completion?.date || '')
         || (right.completion?.dateLastActivity || '').localeCompare(left.completion?.dateLastActivity || '')
         || left.field.name.localeCompare(right.field.name),
       )
     : [];
+  const startedFieldStates = recordFieldStates.filter(fieldState => fieldState.status === 'started');
+  const completedFieldStates = recordFieldStates.filter(fieldState => fieldState.status === 'completed');
+  const plannedFieldStates = operation?.fieldStates.filter(fieldState => fieldState.status === 'planned') || [];
+  const showStartedSection = startedFieldStates.length > 0;
 
   const openCreateEditor = () => {
     setEditorMode('create');
@@ -151,6 +188,19 @@ export const OperationPanel = observer(() => {
                 {percentLabel(operation.acreage.completedPercent)}
               </Typography>
             </Box>
+            {showStartedSection && (
+              <Box sx={{ flex: 1, p: 1.5, bgcolor: '#fff8e1', borderRadius: 1 }}>
+                <Typography variant="subtitle2" color="warning.dark">
+                  Started
+                </Typography>
+                <Typography variant="h6">
+                  {operation.acreage.started.toFixed(2)} ac
+                </Typography>
+                <Typography variant="body2">
+                  {percentLabel(operation.acreage.startedPercent)}
+                </Typography>
+              </Box>
+            )}
             <Box sx={{ flex: 1, p: 1.5, bgcolor: '#ffebee', borderRadius: 1 }}>
               <Typography variant="subtitle2" color="error.main">
                 Planned
@@ -197,21 +247,7 @@ export const OperationPanel = observer(() => {
                       <ListItemText
                         primary={fieldState.field.name}
                         secondaryTypographyProps={{ component: 'div' }}
-                        secondary={(
-                          <Stack spacing={0.25}>
-                            <Typography variant="body2" color="text.secondary">
-                              {`Completed ${fieldState.completion?.date || ''}`}
-                            </Typography>
-                            <Typography variant="body2" color="text.secondary">
-                              {`${fieldState.field.acreage.toFixed(2)} ac`}
-                            </Typography>
-                            {fieldState.completion?.rawPairs.length ? (
-                              <Typography variant="body2" color="text.secondary">
-                                {fieldState.completion.rawPairs.map(pair => `${pair.key}: ${pair.value}`).join(' • ')}
-                              </Typography>
-                            ) : null}
-                          </Stack>
-                        )}
+                        secondary={recordSummary(summarizeFieldState(fieldState))}
                       />
                     </ListItemButton>
                   </ListItem>
@@ -226,14 +262,47 @@ export const OperationPanel = observer(() => {
 
           <Divider />
 
+          {showStartedSection && (
+            <>
+              <Box>
+                <Typography variant="subtitle1" color="warning.dark" sx={{ mb: 1 }}>
+                  Started fields
+                </Typography>
+                <List dense disablePadding>
+                  {startedFieldStates.map(fieldState => (
+                    <ListItem
+                      key={`started-${fieldState.field.name}`}
+                      disablePadding
+                      secondaryAction={(
+                        <Tooltip title={`Show ${fieldState.field.name} on map`}>
+                          <IconButton edge="end" aria-label={`Show ${fieldState.field.name} on map`} onClick={(event) => handleShowFieldOnMap(event, fieldState.field.name)}>
+                            <GpsFixedIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                      )}
+                    >
+                      <ListItemButton sx={{ pr: 7 }} onClick={() => actions.openFieldModal(fieldState.field.name)}>
+                        <ListItemText
+                          primary={fieldState.field.name}
+                          secondaryTypographyProps={{ component: 'div' }}
+                          secondary={recordSummary(summarizeFieldState(fieldState))}
+                        />
+                      </ListItemButton>
+                    </ListItem>
+                  ))}
+                </List>
+              </Box>
+
+              <Divider />
+            </>
+          )}
+
           <Box>
             <Typography variant="subtitle1" color="error.main" sx={{ mb: 1 }}>
               Planned fields
             </Typography>
             <List dense disablePadding>
-              {operation.fieldStates
-                .filter(fieldState => fieldState.status === 'planned')
-                .map(fieldState => (
+              {plannedFieldStates.map(fieldState => (
                   <ListItem
                     key={`planned-${fieldState.field.name}`}
                     disablePadding

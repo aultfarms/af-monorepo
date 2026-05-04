@@ -1,5 +1,6 @@
 import { action, runInAction } from 'mobx';
 import {
+  createLoadRecordId,
   createLoadGroupKey,
   assertDrivers,
   assertFields,
@@ -8,6 +9,9 @@ import {
   assertSpreadRegions,
   assertSources,
   deleteAccessRecord as removeAccessRecord,
+  deleteLoadRecords as removeLoadRecords,
+  deleteSpreadRegionAssignments as removeSpreadRegionAssignments,
+  deleteSpreadRegions as removeSpreadRegions,
   emptyLoadRecord,
   getAccessRecord,
   isAccessEnabled,
@@ -156,26 +160,6 @@ function driverRecordKey(driver: Pick<Driver, 'id' | 'name'>): string {
 
 function cloneSources(sourcesList: Source[]): Source[] {
   return sourcesList.map(source => ({ ...source }));
-}
-
-function cloneRegions(regionsList: SpreadRegion[]): SpreadRegion[] {
-  return regionsList.map(region => ({
-    ...region,
-    polygon: {
-      ...region.polygon,
-      geometry: region.polygon.geometry,
-    },
-    centerline: region.centerline
-      ? {
-          ...region.centerline,
-          geometry: region.centerline.geometry,
-        }
-      : undefined,
-  }));
-}
-
-function cloneRegionAssignments(assignmentsList: SpreadRegionAssignment[]): SpreadRegionAssignment[] {
-  return assignmentsList.map(assignment => ({ ...assignment }));
 }
 
 function cloneDrivers(driversList: Driver[]): Driver[] {
@@ -373,6 +357,85 @@ export const clearHistoryLoadGroupSelection = action('clearHistoryLoadGroupSelec
   });
 });
 
+export const deleteHistoryLoadGroups = action('deleteHistoryLoadGroups', async (requestedLoadGroupKeys?: string[]) => {
+  if (!state.auth.admin) {
+    snackbarMessage('Only admins can delete load history.');
+    return;
+  }
+
+  const loadGroupKeys = [ ...new Set((requestedLoadGroupKeys ?? state.historyManagement.selectedLoadGroupKeys).filter(Boolean)) ];
+  if (loadGroupKeys.length < 1) {
+    snackbarMessage('Select at least one grouped load row to delete.');
+    return;
+  }
+
+  const groupsByKey = summarizeLoadGroupsByKey(state.loads, state.regionAssignments, state.thisYear);
+  const groups = loadGroupKeys
+    .map(loadGroupKey => groupsByKey.get(loadGroupKey))
+    .filter((group): group is NonNullable<typeof group> => !!group);
+
+  if (groups.length < 1) {
+    snackbarMessage('No matching grouped load rows were found to delete.');
+    return;
+  }
+
+  const totalLoads = groups.reduce((sum, group) => sum + group.totalLoads, 0);
+  const confirmMessage = groups.length === 1
+    ? `Delete ${totalLoads} loads from ${groups[0]!.date} ${groups[0]!.field} / ${groups[0]!.source}? This also removes linked spread-region assignments and any region left with no assigned loads.`
+    : `Delete ${totalLoads} loads across ${groups.length} grouped history rows? This also removes linked spread-region assignments and any region left with no assigned loads.`;
+
+  if (!window.confirm(confirmMessage)) {
+    return;
+  }
+
+  const selectedSet = new Set(groups.map(group => group.loadGroupKey));
+  const loadRecordIdsToDelete = groups.flatMap(group => group.records.map(record => record.id || createLoadRecordId(record)));
+  const assignmentsToDelete = state.regionAssignments.filter(assignment => selectedSet.has(assignment.loadGroupKey));
+  const assignmentIdsToDelete = assignmentsToDelete.map(
+    assignment => assignment.id || `${assignment.regionId}__${assignment.loadGroupKey}`,
+  );
+  const nextAssignments = state.regionAssignments.filter(assignment => !selectedSet.has(assignment.loadGroupKey));
+  const affectedRegionIds = new Set(assignmentsToDelete.map(assignment => assignment.regionId));
+  const remainingRegionIds = new Set(nextAssignments.map(assignment => assignment.regionId));
+  const regionIdsToDelete = [ ...affectedRegionIds ].filter(regionId => !remainingRegionIds.has(regionId));
+  const nextRegions = state.regions.filter(region => !region.id || !regionIdsToDelete.includes(region.id));
+  const nextLoads = state.loads.filter(loadRecord => !selectedSet.has(createLoadGroupKey(loadRecord)));
+  const currentLoadId = state.load.id || (
+    state.load.date && state.load.field && state.load.source && state.load.driver
+      ? createLoadRecordId(state.load)
+      : ''
+  );
+
+  historyManagementState({ deleting: true });
+  try {
+    if (assignmentIdsToDelete.length > 0) {
+      await removeSpreadRegionAssignments(state.thisYear, assignmentIdsToDelete);
+    }
+    if (regionIdsToDelete.length > 0) {
+      await removeSpreadRegions(state.thisYear, regionIdsToDelete);
+    }
+    if (loadRecordIdsToDelete.length > 0) {
+      await removeLoadRecords(state.thisYear, loadRecordIdsToDelete);
+    }
+
+    regionAssignments(nextAssignments);
+    regions(nextRegions);
+    loads(nextLoads);
+    historyManagementState({
+      selectedLoadGroupKeys: state.historyManagement.selectedLoadGroupKeys.filter(key => !selectedSet.has(key)),
+    });
+    if (currentLoadId && loadRecordIdsToDelete.includes(currentLoadId)) {
+      load({});
+    }
+    snackbarMessage(groups.length === 1 ? 'Grouped load deleted' : 'Grouped loads deleted');
+  } catch (error) {
+    warn('Error deleting grouped manure load history. Error=%O', error);
+    snackbarMessage(`Error deleting grouped loads: ${(error as Error).message}`);
+  } finally {
+    historyManagementState({ deleting: false });
+  }
+});
+
 export const setDrawEnabled = action('setDrawEnabled', (enabled: boolean) => {
   drawState({ enabled });
 });
@@ -507,7 +570,10 @@ export const saveDrawRegion = action('saveDrawRegion', async (
 
     regions(savedRegions);
     regionAssignments(savedAssignments);
-    historyManagementState({ selectedLoadGroupKeys: [] });
+    historyManagementState({
+      selectedLoadGroupKeys: [],
+      deleting: false,
+    });
     closeDrawModal();
     snackbarMessage('Spread region saved');
   } catch (error) {
@@ -633,6 +699,7 @@ export const resetSessionData = action('resetSessionData', () => {
   historyManagementState({
     modalOpen: false,
     selectedLoadGroupKeys: [],
+    deleting: false,
   });
   drawState({
     enabled: false,
@@ -1235,6 +1302,7 @@ export const openHistoryModal = action('openHistoryModal', () => {
   historyManagementState({
     modalOpen: true,
     selectedLoadGroupKeys: [],
+    deleting: false,
   });
 });
 
@@ -1242,6 +1310,7 @@ export const closeHistoryModal = action('closeHistoryModal', () => {
   historyManagementState({
     modalOpen: false,
     selectedLoadGroupKeys: [],
+    deleting: false,
   });
 });
 

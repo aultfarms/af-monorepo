@@ -10,6 +10,7 @@ export const fieldWorkTrelloConfig = {
 
 export type FieldBoundary = Feature<Polygon | MultiPolygon>;
 export type CompletionValues = Record<string, string>;
+export type CompletionValueGroups = Record<string, string[]>;
 
 export type FieldCardMetadata = {
   aliases: string[];
@@ -79,8 +80,10 @@ export type CompletionRecord = {
   fieldName: string;
   fieldRef: string;
   values: CompletionValues;
+  valueGroups: CompletionValueGroups;
   rawPairs: CompletionPair[];
   note: string;
+  started: boolean;
 };
 
 export type OperationMetadata = {
@@ -94,7 +97,7 @@ export type OperationFieldInclusion = 'all' | 'crop' | 'include' | null;
 
 export type OperationFieldState = {
   field: FieldDefinition;
-  status: 'planned' | 'completed' | 'ineligible';
+  status: 'planned' | 'started' | 'completed' | 'ineligible';
   includedBy: OperationFieldInclusion;
   excluded: boolean;
   completion: CompletionRecord | null;
@@ -118,12 +121,15 @@ export type OperationList = {
   fieldStates: OperationFieldState[];
   fieldStateByName: Record<string, OperationFieldState>;
   eligibleFieldNames: string[];
+  startedFieldNames: string[];
   completedFieldNames: string[];
   plannedFieldNames: string[];
   acreage: {
     total: number;
+    started: number;
     completed: number;
     planned: number;
+    startedPercent: number;
     completedPercent: number;
     plannedPercent: number;
   };

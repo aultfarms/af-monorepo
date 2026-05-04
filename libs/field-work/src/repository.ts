@@ -2,7 +2,7 @@ import area from '@turf/area';
 import debug from 'debug';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { client, type TrelloCard, type TrelloList } from '@aultfarms/trello';
-import type { CompletionPair, CompletionRecord, CompletionValues, CropInput, CropList, FieldBoundary, FieldDefinition, FieldInput, FieldWorkBoard, OperationFieldInclusion, OperationFieldState, OperationList, OperationOption, OperationOptionInput } from './types.js';
+import type { CompletionPair, CompletionRecord, CompletionValueGroups, CompletionValues, CropInput, CropList, FieldBoundary, FieldDefinition, FieldInput, FieldWorkBoard, OperationFieldInclusion, OperationFieldState, OperationList, OperationOption, OperationOptionInput } from './types.js';
 import { fieldWorkTrelloConfig } from './types.js';
 
 const info = debug('af/field-work:info');
@@ -16,7 +16,10 @@ type ParsedCompletion = {
   date: string;
   fieldRef: string;
   rawPairs: CompletionPair[];
+  valueGroups: CompletionValueGroups;
   values: CompletionValues;
+  note: string;
+  started: boolean;
 };
 
 type ParsedCompletionResult =
@@ -141,27 +144,73 @@ function formatFieldCardMetadata(field: FieldInput): string {
     acreage: roundAcres(field.acreage),
   }, { lineWidth: 120 });
 }
-
-export function formatCompletionCard({ date, fieldName, values }: { date: string; fieldName: string; values: CompletionValues }): string {
-  const normalizedPairs = Object.entries(values)
-    .map(([ key, value ]) => [ normalizeWhitespace(key), normalizeWhitespace(value) ] as const)
-    .filter(([ key, value ]) => !!key && !!value);
-  const front = `${date}: ${fieldName}.`;
-  if (normalizedPairs.length < 1) {
-    return front;
-  }
-  const detail = normalizedPairs.map(([ key, value ]) => `${key}: ${value}`).join('; ');
-  return `${front} ${detail}`;
+function normalizeCompletionPairs(rawPairs: CompletionPair[]): CompletionPair[] {
+  return rawPairs
+    .map((pair) => ({
+      key: normalizeWhitespace(pair.key).toLowerCase(),
+      value: normalizeWhitespace(pair.value),
+    }))
+    .filter(pair => !!pair.key && !!pair.value);
 }
 
-function parseFrontKeyValuePairs(value: string): CompletionPair[] | null {
-  if (!value.trim()) {
-    return [];
+function buildCompletionValueGroups(rawPairs: CompletionPair[]): CompletionValueGroups {
+  const valueGroups: CompletionValueGroups = {};
+  for (const pair of rawPairs) {
+    valueGroups[pair.key] = [ ...(valueGroups[pair.key] || []), pair.value ];
   }
+  return valueGroups;
+}
+
+function buildCompletionValues(valueGroups: CompletionValueGroups): CompletionValues {
+  const values: CompletionValues = {};
+  for (const [key, group] of Object.entries(valueGroups)) {
+    const lastValue = group[group.length - 1];
+    if (lastValue) {
+      values[key] = lastValue;
+    }
+  }
+  return values;
+}
+
+export function formatCompletionCard({
+  date,
+  fieldName,
+  rawPairs,
+  started,
+}: {
+  date: string;
+  fieldName: string;
+  rawPairs: CompletionPair[];
+  started?: boolean;
+}): string {
+  const normalizedPairs = normalizeCompletionPairs(rawPairs);
+  const front = `${date}: ${fieldName}.`;
+  const detailSegments = [
+    ...(started ? [ 'STARTED' ] : []),
+    ...normalizedPairs.map(({ key, value }) => `${key}: ${value}`),
+  ];
+  if (detailSegments.length < 1) {
+    return front;
+  }
+  return `${front} ${detailSegments.join('; ')}`;
+}
+
+function parseFrontKeyValuePairs(value: string): { rawPairs: CompletionPair[]; started: boolean } | null {
+  if (!value.trim()) {
+    return {
+      rawPairs: [],
+      started: false,
+    };
+  }
+  let started = false;
   const pairs: CompletionPair[] = [];
   for (const segment of value.split(';')) {
     const trimmed = segment.trim();
     if (!trimmed) continue;
+    if (trimmed.toUpperCase() === 'STARTED') {
+      started = true;
+      continue;
+    }
     const colonIndex = trimmed.indexOf(':');
     if (colonIndex < 1) {
       return null;
@@ -173,7 +222,10 @@ function parseFrontKeyValuePairs(value: string): CompletionPair[] | null {
     }
     pairs.push({ key, value: pairValue });
   }
-  return pairs;
+  return {
+    rawPairs: pairs,
+    started,
+  };
 }
 
 function parseCompletionCardName(name: string): ParsedCompletionResult {
@@ -189,23 +241,23 @@ function parseCompletionCardName(name: string): ParsedCompletionResult {
     return { type: 'ignore' };
   }
 
-  const rawPairs = parseFrontKeyValuePairs(tail);
-  if (!rawPairs) {
+  const parsedTail = parseFrontKeyValuePairs(tail);
+  if (!parsedTail) {
     return { type: 'ignore' };
   }
-
-  const values: CompletionValues = {};
-  for (const pair of rawPairs) {
-    values[pair.key] = pair.value;
-  }
+  const valueGroups = buildCompletionValueGroups(parsedTail.rawPairs);
+  const values = buildCompletionValues(valueGroups);
 
   return {
     type: 'completion',
     completion: {
       date,
       fieldRef,
-      rawPairs,
+      rawPairs: parsedTail.rawPairs,
+      valueGroups,
       values,
+      note: values.note || '',
+      started: parsedTail.started,
     },
   };
 }
@@ -453,8 +505,10 @@ function buildOperationList({
       fieldName: resolvedField,
       fieldRef: parsed.completion.fieldRef,
       values: parsed.completion.values,
+      valueGroups: parsed.completion.valueGroups,
       rawPairs: parsed.completion.rawPairs,
-      note: parsed.completion.values.note || '',
+      note: parsed.completion.note,
+      started: parsed.completion.started,
     });
   }
 
@@ -510,7 +564,13 @@ function buildOperationList({
   const fieldStates: OperationFieldState[] = sortFields(fields).map((field) => {
     const eligible = eligibleFields.has(field.name);
     const completion = eligible ? (newestCompletions.get(field.name) || null) : null;
-    const status: OperationFieldState['status'] = completion ? 'completed' : eligible ? 'planned' : 'ineligible';
+    const status: OperationFieldState['status'] = !eligible
+      ? 'ineligible'
+      : !completion
+        ? 'planned'
+        : completion.started
+          ? 'started'
+          : 'completed';
     return {
       field,
       status,
@@ -519,12 +579,16 @@ function buildOperationList({
       completion,
     };
   });
+  const startedFieldNames = fieldStates.filter(fieldState => fieldState.status === 'started').map(fieldState => fieldState.field.name);
 
   const completedFieldNames = fieldStates.filter(fieldState => fieldState.status === 'completed').map(fieldState => fieldState.field.name);
   const plannedFieldNames = fieldStates.filter(fieldState => fieldState.status === 'planned').map(fieldState => fieldState.field.name);
   const eligibleFieldNames = fieldStates.filter(fieldState => fieldState.status !== 'ineligible').map(fieldState => fieldState.field.name);
   const totalAcres = fieldStates
     .filter(fieldState => fieldState.status !== 'ineligible')
+    .reduce((sum, fieldState) => sum + fieldState.field.acreage, 0);
+  const startedAcres = fieldStates
+    .filter(fieldState => fieldState.status === 'started')
     .reduce((sum, fieldState) => sum + fieldState.field.acreage, 0);
   const completedAcres = fieldStates
     .filter(fieldState => fieldState.status === 'completed')
@@ -555,12 +619,15 @@ function buildOperationList({
     fieldStates,
     fieldStateByName: toFieldStateMap(fieldStates),
     eligibleFieldNames,
+    startedFieldNames,
     completedFieldNames,
     plannedFieldNames,
     acreage: {
       total: roundAcres(totalAcres),
+      started: roundAcres(startedAcres),
       completed: roundAcres(completedAcres),
       planned: roundAcres(plannedAcres),
+      startedPercent: percent(startedAcres, totalAcres),
       completedPercent: percent(completedAcres, totalAcres),
       plannedPercent: percent(plannedAcres, totalAcres),
     },
@@ -1167,6 +1234,41 @@ export async function removeFieldFromOperationExclude({
     values: operation.metadata.exclude.filter(name => normalizeFieldReference(name) !== normalizeFieldReference(fieldName)),
   });
 }
+export async function saveOperationRecord({
+  client,
+  operation,
+  fieldName,
+  date,
+  rawPairs,
+  started,
+  recordCardId,
+}: {
+  client: client.Client;
+  operation: OperationList;
+  fieldName: string;
+  date: string;
+  rawPairs: CompletionPair[];
+  started?: boolean;
+  recordCardId?: string;
+}): Promise<void> {
+  const name = formatCompletionCard({
+    date,
+    fieldName,
+    rawPairs,
+    started,
+  });
+
+  if (recordCardId) {
+    await client.put(`/cards/${recordCardId}`, { name });
+  } else {
+    await client.post('/cards', {
+      idList: operation.idList,
+      name,
+      pos: 'bottom',
+    });
+  }
+  cachedBoard = null;
+}
 
 export async function saveOperationCompletion({
   client,
@@ -1181,12 +1283,13 @@ export async function saveOperationCompletion({
   date: string;
   values: CompletionValues;
 }): Promise<void> {
-  await client.post('/cards', {
-    idList: operation.idList,
-    name: formatCompletionCard({ date, fieldName, values }),
-    pos: 'bottom',
+  await saveOperationRecord({
+    client,
+    operation,
+    fieldName,
+    date,
+    rawPairs: Object.entries(values).map(([ key, value ]) => ({ key, value })),
   });
-  cachedBoard = null;
 }
 
 export async function deleteOperationCompletion({

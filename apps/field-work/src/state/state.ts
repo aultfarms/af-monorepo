@@ -1,6 +1,6 @@
 import { observable } from 'mobx';
 import type { LatLngBoundsLiteral, LatLngTuple } from 'leaflet';
-import type { CompletionValues, FieldBoundary, FieldWorkBoard } from '@aultfarms/field-work';
+import type { CompletionValueGroups, FieldBoundary, FieldWorkBoard } from '@aultfarms/field-work';
 
 export type EditableField = {
   cardId?: string;
@@ -60,7 +60,8 @@ export type TrelloDiagnostics = {
   boardsInDefaultOrganization: TrelloDiagnosticBoard[];
 };
 
-export type FieldModalAction = 'complete' | 'uncomplete' | 'include' | 'exclude' | 'remove_exclude' | '';
+export type FieldModalMode = 'record' | 'include' | 'remove_exclude' | '';
+export type FieldModalStatus = 'planned' | 'started' | 'completed' | 'ineligible' | '';
 export type AppIssue = {
   key: string;
   level: 'error' | 'warning';
@@ -105,10 +106,11 @@ export type State = {
   fieldModal: {
     open: boolean;
     fieldName: string;
-    action: FieldModalAction;
+    mode: FieldModalMode;
+    status: FieldModalStatus;
     date: string;
     note: string;
-    values: CompletionValues;
+    values: CompletionValueGroups;
   };
 };
 
@@ -195,7 +197,8 @@ export const state = observable<State>({
   fieldModal: {
     open: false,
     fieldName: '',
-    action: '',
+    mode: '',
+    status: '',
     date: new Date().toISOString().split('T')[0] || '',
     note: '',
     values: {},

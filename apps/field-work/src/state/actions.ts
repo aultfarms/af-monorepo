@@ -6,6 +6,8 @@ import {
   addFieldToOperationInclude,
   deleteOperationCompletion,
   defaultFieldAreaAcres,
+  type CompletionPair,
+  type CompletionValueGroups,
   type FieldBoundary,
   fieldWorkTrelloConfig,
   fieldWorkBoard,
@@ -16,7 +18,7 @@ import {
   saveOperationCropFilter as persistOperationCropFilter,
   saveOperationDefinition as persistOperationDefinition,
   saveOperationOptions,
-  saveOperationCompletion,
+  saveOperationRecord,
   type CompletionValues,
   type CropInput,
   type CropList,
@@ -28,7 +30,7 @@ import {
   type OperationOptionInput,
 } from '@aultfarms/field-work';
 import { boundsForBoundary, boundsForFields, boundsForPoint, extendBoundsToIncludePoint, parseKMZIntoEditableFields } from '../util';
-import { state, type AppIssue, type EditableCrop, type EditableField, type EditableOption, type FieldModalAction, type State } from './state';
+import { state, type AppIssue, type EditableCrop, type EditableField, type EditableOption, type State } from './state';
 
 const info = debug('af/field-work:info');
 const trelloPublicApiKey = '3ad06cb25802014a3f24f479e886771c';
@@ -38,6 +40,16 @@ const fieldWorkLocalStorageKeys = [
   'af.field-work.operation',
   'af.field-work.operation-options',
 ] as const;
+type FieldModalSubmitAction =
+  | 'start'
+  | 'complete'
+  | 'save_started'
+  | 'save_completed'
+  | 'exclude'
+  | 'unstart'
+  | 'uncomplete'
+  | 'include'
+  | 'remove_exclude';
 
 function persistMapView(): void {
   localStorage.setItem('af.field-work.map', JSON.stringify(state.mapView));
@@ -233,6 +245,10 @@ function selectedOperation(): OperationList | null {
   return state.board.operations.find(operation => operation.name === state.selectedOperationName) || null;
 }
 
+function optionTypeKeys(operation: OperationList): string[] {
+  return Object.keys(operation.metadata.optionsByType);
+}
+
 function syncOptionDraftsForOperation(operationName: string): void {
   const operation = state.board?.operations.find(candidate => candidate.name === operationName) || null;
   replaceOptionDrafts(editableOptionsFromOperation(operation));
@@ -296,7 +312,7 @@ function nextNewOptionDraftKey(): string {
   return nextKey;
 }
 
-function selectedOperationFieldAction(fieldName: string): FieldModalAction {
+function selectedOperationFieldModalMode(fieldName: string): State['fieldModal']['mode'] {
   const operation = selectedOperation();
   if (!operation) {
     return '';
@@ -305,11 +321,8 @@ function selectedOperationFieldAction(fieldName: string): FieldModalAction {
   if (!fieldState) {
     return '';
   }
-  if (fieldState.status === 'completed') {
-    return 'uncomplete';
-  }
-  if (fieldState.status === 'planned') {
-    return 'complete';
+  if (fieldState.status === 'planned' || fieldState.status === 'started' || fieldState.status === 'completed') {
+    return 'record';
   }
   return fieldState.excluded ? 'remove_exclude' : 'include';
 }
@@ -331,10 +344,80 @@ function defaultCompletionValues(operation: OperationList): CompletionValues {
   return values;
 }
 
-function rememberOperationOptionDefaults(operation: OperationList, values: CompletionValues): void {
+function defaultCompletionValueGroups(operation: OperationList): CompletionValueGroups {
+  const defaults = defaultCompletionValues(operation);
+  const valueGroups: CompletionValueGroups = {};
+  for (const typeKey of optionTypeKeys(operation)) {
+    const defaultValue = defaults[typeKey];
+    if (defaultValue) {
+      valueGroups[typeKey] = [ defaultValue ];
+    }
+  }
+  return valueGroups;
+}
+
+function fieldModalValueGroups(operation: OperationList, fieldName: string): CompletionValueGroups {
+  const fieldState = operation.fieldStateByName[fieldName];
+  const defaults = defaultCompletionValueGroups(operation);
+  const groups: CompletionValueGroups = {};
+
+  for (const [typeKey, options] of Object.entries(operation.metadata.optionsByType)) {
+    const existingValues = fieldState?.completion?.valueGroups[typeKey]
+      ?.map(value => value.trim())
+      .filter(Boolean)
+      || [];
+    if (existingValues.length > 0) {
+      groups[typeKey] = existingValues;
+      continue;
+    }
+
+    const defaultValues = defaults[typeKey] || [];
+    if (defaultValues.length > 0) {
+      groups[typeKey] = [ ...defaultValues ];
+      continue;
+    }
+
+    const firstOption = options[0];
+    if (firstOption) {
+      groups[typeKey] = [ firstOption.name ];
+    }
+  }
+
+  return groups;
+}
+
+function fieldModalRawPairs(operation: OperationList, fieldName: string): CompletionPair[] {
+  const knownTypeKeys = new Set(optionTypeKeys(operation));
+  const existingCompletion = operation.fieldStateByName[fieldName]?.completion || null;
+  const preservedPairs = existingCompletion?.rawPairs.filter(pair => pair.key !== 'note' && !knownTypeKeys.has(pair.key)) || [];
+  const nextPairs: CompletionPair[] = [ ...preservedPairs ];
+
+  for (const typeKey of optionTypeKeys(operation)) {
+    for (const value of state.fieldModal.values[typeKey] || []) {
+      const trimmedValue = value.trim();
+      if (trimmedValue) {
+        nextPairs.push({
+          key: typeKey,
+          value: trimmedValue,
+        });
+      }
+    }
+  }
+
+  if (state.fieldModal.note.trim()) {
+    nextPairs.push({
+      key: 'note',
+      value: state.fieldModal.note.trim(),
+    });
+  }
+
+  return nextPairs;
+}
+
+function rememberOperationOptionDefaults(operation: OperationList, valueGroups: CompletionValueGroups): void {
   const nextValues: CompletionValues = {};
   for (const [typeKey, options] of Object.entries(operation.metadata.optionsByType)) {
-    const currentValue = values[typeKey];
+    const currentValue = (valueGroups[typeKey] || []).find(value => options.some(option => option.name === value));
     if (currentValue && options.some(option => option.name === currentValue)) {
       nextValues[typeKey] = currentValue;
     }
@@ -646,19 +729,14 @@ export const openFieldModal = action('openFieldModal', (fieldName: string) => {
     return;
   }
 
-  const modalAction = selectedOperationFieldAction(fieldName);
-  const values = fieldState.completion
-    ? { ...fieldState.completion.values }
-    : defaultCompletionValues(operation);
-  delete values.note;
-
   state.fieldModal = {
     open: true,
     fieldName,
-    action: modalAction,
+    mode: selectedOperationFieldModalMode(fieldName),
+    status: fieldState.status,
     date: fieldState.completion?.date || currentDate(),
     note: fieldState.completion?.note || '',
-    values,
+    values: fieldModalValueGroups(operation, fieldName),
   };
 });
 
@@ -666,7 +744,8 @@ export const closeFieldModal = action('closeFieldModal', () => {
   state.fieldModal = {
     open: false,
     fieldName: '',
-    action: '',
+    mode: '',
+    status: '',
     date: currentDate(),
     note: '',
     values: {},
@@ -680,9 +759,26 @@ export const fieldModalDate = action('fieldModalDate', (date: string) => {
 export const fieldModalNote = action('fieldModalNote', (note: string) => {
   state.fieldModal.note = note;
 });
+export const fieldModalValue = action('fieldModalValue', (key: string, index: number, value: string) => {
+  const currentValues = [ ...(state.fieldModal.values[key] || []) ];
+  currentValues[index] = value;
+  state.fieldModal.values[key] = currentValues;
+});
 
-export const fieldModalValue = action('fieldModalValue', (key: string, value: string) => {
-  state.fieldModal.values[key] = value;
+export const duplicateFieldModalValue = action('duplicateFieldModalValue', (key: string, index: number) => {
+  const currentValues = [ ...(state.fieldModal.values[key] || []) ];
+  const valueToDuplicate = currentValues[index] || currentValues[currentValues.length - 1] || '';
+  currentValues.splice(index + 1, 0, valueToDuplicate);
+  state.fieldModal.values[key] = currentValues;
+});
+
+export const removeFieldModalValue = action('removeFieldModalValue', (key: string, index: number) => {
+  const currentValues = [ ...(state.fieldModal.values[key] || []) ];
+  if (currentValues.length <= 1) {
+    return;
+  }
+  currentValues.splice(index, 1);
+  state.fieldModal.values[key] = currentValues;
 });
 
 export const applyBoard = action('applyBoard', (board: State['board']) => {
@@ -900,44 +996,49 @@ export const handleMapFieldClick = action('handleMapFieldClick', (fieldName: str
   openFieldModal(fieldName);
 });
 
-export const submitFieldModal = action('submitFieldModal', async () => {
+export const submitFieldModal = action('submitFieldModal', async (nextAction: FieldModalSubmitAction) => {
   const operation = selectedOperation();
   if (!operation || !state.fieldModal.fieldName) {
     return;
   }
 
   try {
-    if (state.fieldModal.action === 'complete') {
-      const values: CompletionValues = {
-        ...state.fieldModal.values,
-      };
-      if (state.fieldModal.note.trim()) {
-        values.note = state.fieldModal.note.trim();
-      }
-      await saveOperationCompletion({
+    if ([ 'start', 'complete', 'save_started', 'save_completed' ].includes(nextAction)) {
+      const completionId = operation.fieldStateByName[state.fieldModal.fieldName]?.completion?.cardId;
+      await saveOperationRecord({
         client: await trello(),
         operation,
         fieldName: state.fieldModal.fieldName,
         date: state.fieldModal.date,
-        values,
+        rawPairs: fieldModalRawPairs(operation, state.fieldModal.fieldName),
+        started: nextAction === 'start' || nextAction === 'save_started',
+        recordCardId: completionId,
       });
       rememberOperationOptionDefaults(operation, state.fieldModal.values);
-      snackbarMessage(`Completed ${state.fieldModal.fieldName}`);
+      snackbarMessage(
+        nextAction === 'start' || nextAction === 'save_started'
+          ? `Started ${state.fieldModal.fieldName}`
+          : `Completed ${state.fieldModal.fieldName}`,
+      );
     }
 
-    if (state.fieldModal.action === 'uncomplete') {
+    if (nextAction === 'unstart' || nextAction === 'uncomplete') {
       const completionId = operation.fieldStateByName[state.fieldModal.fieldName]?.completion?.cardId;
       if (!completionId) {
-        throw new Error('Selected field does not have a completion card');
+        throw new Error('Selected field does not have a record card');
       }
       await deleteOperationCompletion({
         client: await trello(),
         completionCardId: completionId,
       });
-      snackbarMessage(`Removed completion for ${state.fieldModal.fieldName}`);
+      snackbarMessage(
+        nextAction === 'unstart'
+          ? `Removed started record for ${state.fieldModal.fieldName}`
+          : `Removed completion for ${state.fieldModal.fieldName}`,
+      );
     }
 
-    if (state.fieldModal.action === 'include') {
+    if (nextAction === 'include') {
       await addFieldToOperationInclude({
         client: await trello(),
         operation,
@@ -945,8 +1046,15 @@ export const submitFieldModal = action('submitFieldModal', async () => {
       });
       snackbarMessage(`Included ${state.fieldModal.fieldName}`);
     }
-
-    if (state.fieldModal.action === 'remove_exclude') {
+    if (nextAction === 'exclude') {
+      await addFieldToOperationExclude({
+        client: await trello(),
+        operation,
+        fieldName: state.fieldModal.fieldName,
+      });
+      snackbarMessage(`Excluded ${state.fieldModal.fieldName}`);
+    }
+    if (nextAction === 'remove_exclude') {
       await removeFieldFromOperationExclude({
         client: await trello(),
         operation,
@@ -959,26 +1067,6 @@ export const submitFieldModal = action('submitFieldModal', async () => {
     await loadBoard(true);
   } catch (error) {
     loadingError(`Unable to update operation: ${(error as Error).message}`);
-  }
-});
-
-export const excludeFromFieldModal = action('excludeFromFieldModal', async () => {
-  const operation = selectedOperation();
-  if (!operation || !state.fieldModal.fieldName) {
-    return;
-  }
-
-  try {
-    await addFieldToOperationExclude({
-      client: await trello(),
-      operation,
-      fieldName: state.fieldModal.fieldName,
-    });
-    closeFieldModal();
-    await loadBoard(true);
-    snackbarMessage(`Excluded ${state.fieldModal.fieldName}`);
-  } catch (error) {
-    loadingError(`Unable to exclude field: ${(error as Error).message}`);
   }
 });
 

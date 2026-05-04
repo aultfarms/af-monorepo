@@ -10,6 +10,7 @@ import {
   getDocsFromCache,
   setDoc,
   writeBatch,
+  type CollectionReference,
   type DocumentData,
   type DocumentReference,
   type Query,
@@ -294,6 +295,26 @@ function accessDocRef(email: string) {
 
 function accessCollectionRef() {
   return collection(firestore(), MANURE_ACCESS_COLLECTION);
+}
+
+async function deleteDocumentIds(
+  collectionRef: CollectionReference<DocumentData>,
+  ids: string[],
+): Promise<number> {
+  const uniqueIds = [ ...new Set(ids.filter(Boolean)) ];
+  if (uniqueIds.length < 1) {
+    return 0;
+  }
+
+  for (let index = 0; index < uniqueIds.length; index += 400) {
+    const batch = writeBatch(firestore());
+    for (const id of uniqueIds.slice(index, index + 400)) {
+      batch.delete(doc(collectionRef, id));
+    }
+    await batch.commit();
+  }
+
+  return uniqueIds.length;
 }
 
 function isOfflineFirestoreError(error: unknown): boolean {
@@ -1018,6 +1039,21 @@ export async function saveLoadRecord(year: number, load: LoadsRecord, actorEmail
   );
 
   return normalizedLoad;
+}
+
+export async function deleteLoadRecords(year: number, ids: string[]): Promise<void> {
+  const deletedCount = await deleteDocumentIds(subcollectionRef(year, 'loads'), ids);
+  info('Deleted manure load records year=%d count=%d', year, deletedCount);
+}
+
+export async function deleteSpreadRegionAssignments(year: number, ids: string[]): Promise<void> {
+  const deletedCount = await deleteDocumentIds(spreadRegionAssignmentsCollectionRef(year), ids);
+  info('Deleted manure spread region assignments year=%d count=%d', year, deletedCount);
+}
+
+export async function deleteSpreadRegions(year: number, ids: string[]): Promise<void> {
+  const deletedCount = await deleteDocumentIds(spreadRegionsCollectionRef(year), ids);
+  info('Deleted manure spread regions year=%d count=%d', year, deletedCount);
 }
 
 export async function getAccessRecord(email: string): Promise<AccessRecord | null> {

@@ -92,6 +92,7 @@ export type State = {
   historyManagement: {
     modalOpen: boolean;
     selectedLoadGroupKeys: string[];
+    deleting: boolean;
   };
   draw: DrawManagementState;
   lookupManagement: {
@@ -250,6 +251,7 @@ export const state = observable<State>({
   historyManagement: {
     modalOpen: false,
     selectedLoadGroupKeys: [],
+    deleting: false,
   },
   draw: emptyDrawManagementState(),
   lookupManagement: {

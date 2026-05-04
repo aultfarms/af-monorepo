@@ -378,6 +378,15 @@ export const Map = observer(() => {
                 opacity: 0.9,
               };
             }
+            if (fieldState.status === 'started') {
+              return {
+                color: '#f57f17',
+                fillColor: '#fdd835',
+                fillOpacity: 0.45,
+                weight: 2,
+                opacity: 0.9,
+              };
+            }
             return {
               color: '#b71c1c',
               fillColor: '#ef5350',
