@@ -8,6 +8,11 @@ import L from 'leaflet';
 import debug from 'debug';
 import type { Feature, Geometry } from 'geojson';
 import { createLoadGroupKey } from '@aultfarms/manure';
+import {
+  EXISTING_SPREAD_REGION_BORDER_COLOR,
+  EXISTING_SPREAD_REGION_FILL_COLOR,
+} from './regionColors';
+import { MANURE_MAP_TILE_ATTRIBUTION, MANURE_MAP_TILE_URL } from './mapTiles';
 
 import 'leaflet/dist/leaflet.css';
 import './Map.css';
@@ -91,11 +96,21 @@ export const Map = observer(() => {
         .map(assignment => assignment.regionId),
     )
   ), [currentLoadGroupKey, state.regionAssignments]);
-  const todayLoads = state.loads
-    .filter(r => r.date === l.date && r.field === l.field && r.source === l.source)
-    .reduce((sum, r) => sum + r.loads, 0);
+  const selectedFieldRegionsGeoJson = React.useMemo(() => ({
+    type: 'FeatureCollection' as const,
+    features: state.regions
+      .filter(region => region.field === state.load.field && !region.supersededByRegionId)
+      .map(region => ({
+        ...region.polygon,
+        properties: {
+          id: region.id,
+          field: region.field,
+          mode: region.mode,
+        },
+      })),
+  }), [state.load.field, state.regions]);
   const seasonLoads = state.loads
-    .filter(r => r.field === l.field && r.source === l.source)
+    .filter(r => r.field === l.field)
     .reduce((sum, r) => sum + r.loads, 0);
 
   // Referencing rev so mobx will redraw
@@ -118,7 +133,10 @@ export const Map = observer(() => {
         zoom={state.mapView.zoom}
         zoomControl={false} // get rid of the +/- zoom buttons
       >
-        <TileLayer url="https://tiles.stadiamaps.com/tiles/alidade_satellite/{z}/{x}/{y}{r}.jpg"/>
+        <TileLayer
+          url={MANURE_MAP_TILE_URL}
+          attribution={MANURE_MAP_TILE_ATTRIBUTION}
+        />
 
         <Marker
           position={[state.currentGPS.lat, state.currentGPS.lon]}
@@ -128,23 +146,25 @@ export const Map = observer(() => {
         </Marker>
 
         <GeoJSON
-          data={actions.geojsonRegions()}
+          key={`regions-${state.load.field || 'none'}-${state.geojsonRegions.rev}`}
+          data={selectedFieldRegionsGeoJson}
+          interactive={false}
           style={(feature) => {
             const regionId = feature?.properties?.id as string | undefined;
             const isCurrent = !!regionId && currentRegionIds.has(regionId);
             const isSelected = !!regionId && selectedRegionIds.has(regionId);
-            const isCurrentField = feature?.properties?.field === state.load.field;
             return {
-              color: isCurrent ? '#e0a800' : isSelected ? '#d4b000' : '#cdbd63',
-              weight: isCurrent ? 3 : isSelected ? 2.5 : 1.5,
-              opacity: isCurrent || isSelected ? 0.95 : 0.7,
-              fillColor: '#fff4b8',
-              fillOpacity: isCurrent ? 0.5 : isSelected ? 0.38 : (isCurrentField ? 0.28 : 0.18),
+              color: EXISTING_SPREAD_REGION_BORDER_COLOR,
+              weight: isCurrent ? 3 : isSelected ? 2.5 : 2,
+              opacity: 1,
+              fillColor: EXISTING_SPREAD_REGION_FILL_COLOR,
+              fillOpacity: 0.75,
             };
           }}
         />
 
         <GeoJSON
+          key={`fields-${state.geojsonFields.rev}`}
           data={actions.geojsonFields()}
           style={(feature) => ({
             color: feature?.properties.name === state.load.field ? '#00FF00' : '#0000FF', // Red for active, blue for others
@@ -160,7 +180,7 @@ export const Map = observer(() => {
         <MapController/>
       </MapContainer>
       <Typography sx={{ position: 'absolute', top: '10px', left: '10px', background: 'rgba(255, 255, 255, 0.7)', padding: '5px', zIndex: 1000 }}>
-        Field: {state.load.field || 'None'} | Source: {state.load.source || 'None'} | Today: {todayLoads} | Season: {seasonLoads}
+        {state.load.field || 'None'} | {state.load.source || 'None'} | {seasonLoads}
       </Typography>
       <Tooltip title="Zoom to selected field">
         <span

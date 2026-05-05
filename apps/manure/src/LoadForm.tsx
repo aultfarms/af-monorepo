@@ -37,11 +37,6 @@ export const LoadForm = observer(() => {
           sx={{ mr: 0 }}
         />
       </Box>
-      {state.draw.enabled && (
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          After +Load, a draw modal will open so you can mark the covered area.
-        </Typography>
-      )}
       <TextField
         label="Date"
         type="date"

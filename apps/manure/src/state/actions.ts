@@ -223,6 +223,36 @@ function fieldDefaultHeading(fieldName: string): number | null {
   return typeof field?.defaultHeadingDegrees === 'number' ? field.defaultHeadingDegrees : null;
 }
 
+function nextNewFieldName(): string {
+  const existingNames = new Set(state.fields.map(field => field.name));
+  let nextName = 'New Field';
+  let suffix = 2;
+  while (existingNames.has(nextName)) {
+    nextName = `New Field ${suffix}`;
+    suffix += 1;
+  }
+  return nextName;
+}
+
+function placeholderFieldBoundary(): Feature<Polygon> {
+  const [ lat, lon ] = state.mapView.center;
+  const delta = 0.00005;
+  return {
+    type: 'Feature',
+    properties: null,
+    geometry: {
+      type: 'Polygon',
+      coordinates: [[
+        [ lon - delta, lat - delta ],
+        [ lon + delta, lat - delta ],
+        [ lon + delta, lat + delta ],
+        [ lon - delta, lat + delta ],
+        [ lon - delta, lat - delta ],
+      ]],
+    },
+  };
+}
+
 function sessionLoadUserSummary(user: ReturnType<typeof getCurrentUser>) {
   if (!user) {
     return null;
@@ -479,6 +509,7 @@ export const openDrawModalForLoadGroups = action(
     drawState({
       modalOpen: true,
       saving: false,
+      purpose: 'region',
       mode: preferredMode || (selectedGroups.length > 1 ? 'polygon' : 'load'),
       targetLoadGroupKeys: selectedGroups.map(group => group.loadGroupKey),
       assignmentLoadCounts,
@@ -497,10 +528,51 @@ export const openDrawModalForCurrentLoad = action('openDrawModalForCurrentLoad',
   openDrawModalForLoadGroups([ createLoadGroupKey(state.load) ], 'load');
 });
 
+export const openDrawModalForFieldHeading = action('openDrawModalForFieldHeading', (fieldName: string) => {
+  const field = state.fields.find(candidate => candidate.name === fieldName);
+  if (!field) {
+    snackbarMessage(`Field "${fieldName}" not found`);
+    return;
+  }
+
+  drawState({
+    modalOpen: true,
+    saving: false,
+    purpose: 'fieldHeading',
+    mode: 'load',
+    targetLoadGroupKeys: [],
+    assignmentLoadCounts: {},
+    targetField: fieldName,
+    headingDegrees: fieldDefaultHeading(fieldName),
+    useDefaultFieldHeading: true,
+  });
+});
+
+export const openDrawModalForFieldBoundary = action('openDrawModalForFieldBoundary', (fieldName: string) => {
+  const field = state.fields.find(candidate => candidate.name === fieldName);
+  if (!field) {
+    snackbarMessage(`Field "${fieldName}" not found`);
+    return;
+  }
+
+  drawState({
+    modalOpen: true,
+    saving: false,
+    purpose: 'fieldBoundary',
+    mode: 'polygon',
+    targetLoadGroupKeys: [],
+    assignmentLoadCounts: {},
+    targetField: fieldName,
+    headingDegrees: fieldDefaultHeading(fieldName),
+    useDefaultFieldHeading: true,
+  });
+});
+
 export const closeDrawModal = action('closeDrawModal', () => {
   drawState({
     modalOpen: false,
     saving: false,
+    purpose: 'region',
     targetLoadGroupKeys: [],
     assignmentLoadCounts: {},
     targetField: '',
@@ -584,6 +656,18 @@ export const saveDrawRegion = action('saveDrawRegion', async (
   }
 });
 
+export const saveFieldHeadingFromDraw = action('saveFieldHeadingFromDraw', (headingDegrees: number) => {
+  if (!state.draw.targetField) {
+    snackbarMessage('Choose a field before saving a heading.');
+    return;
+  }
+
+  fieldDefaultHeadingDegrees(state.draw.targetField, headingDegrees);
+  persistFieldHeading(state.draw.targetField, null);
+  closeDrawModal();
+  snackbarMessage('Field default heading updated. Save fields to persist it.');
+});
+
 export const revertDrawHeadingToFieldDefault = action('revertDrawHeadingToFieldDefault', () => {
   if (!state.draw.targetField) {
     return;
@@ -615,6 +699,13 @@ export const drawState = action('drawState', (draw: Partial<State['draw']>) => {
   state.draw = {
     ...state.draw,
     ...draw,
+  };
+});
+
+export const activityOverlayState = action('activityOverlayState', (activityOverlay: Partial<State['activityOverlay']>) => {
+  state.activityOverlay = {
+    ...state.activityOverlay,
+    ...activityOverlay,
   };
 });
 
@@ -693,6 +784,7 @@ export const resetSessionData = action('resetSessionData', () => {
   previousLoads([]);
   regions([]);
   regionAssignments([]);
+  state.pendingBoundaryFieldNames = [];
   state.load = nextBlankLoad();
   refreshStoredLoadRecord();
   fieldsChanged(false);
@@ -705,12 +797,18 @@ export const resetSessionData = action('resetSessionData', () => {
     enabled: false,
     modalOpen: false,
     saving: false,
+    purpose: 'region',
     mode: 'load',
     targetLoadGroupKeys: [],
     assignmentLoadCounts: {},
     targetField: '',
     headingDegrees: null,
     useDefaultFieldHeading: true,
+  });
+  activityOverlayState({
+    open: false,
+    title: '',
+    message: '',
   });
 });
 
@@ -820,6 +918,7 @@ export const loadAllData = action('loadAllData', async () => {
     previousLoads(data.previousLoads);
     regions(data.regions);
     regionAssignments(data.regionAssignments);
+    state.pendingBoundaryFieldNames = [];
     fieldsChanged(false);
     load({});
     info(
@@ -865,10 +964,18 @@ export const fieldsChanged = action('fieldsChanged', (value: boolean) => {
 });
 
 export const saveFields = action('saveFields', async () => {
+  const remainingPendingFieldNames = state.pendingBoundaryFieldNames.filter(
+    fieldName => state.fields.some(field => field.name === fieldName),
+  );
+  if (remainingPendingFieldNames.length > 0) {
+    snackbarMessage(`Draw a boundary for ${remainingPendingFieldNames.join(', ')} before saving fields.`);
+    return;
+  }
   loading(true);
   try {
     const savedFields = await persistFields(state.thisYear, state.fields, currentActorEmail());
     fields(savedFields);
+    state.pendingBoundaryFieldNames = [];
     fieldsChanged(false);
     snackbarMessage('Fields saved');
   } catch (error) {
@@ -878,7 +985,7 @@ export const saveFields = action('saveFields', async () => {
   }
 });
 
-export async function parseKMZIntoFields(file: File): Promise<Array<Pick<Field, 'name' | 'acreage' | 'boundary'>>> {
+export async function parseKMZIntoFields(file: File): Promise<Array<Pick<Field, 'name' | 'acreage' | 'responsibleParty' | 'boundary'>>> {
   const arrayBuffer = await file.arrayBuffer();
   const zip = await JSZip.loadAsync(arrayBuffer);
   const kmlFile = Object.values(zip.files).find(candidate => candidate.name.endsWith('.kml'));
@@ -896,17 +1003,19 @@ export async function parseKMZIntoFields(file: File): Promise<Array<Pick<Field, 
     .map(feature => ({
       name: feature.properties?.name || 'Unnamed Field',
       acreage: nominalFieldAcreage(feature.properties?.name || 'Unnamed Field', feature as Feature<Polygon | MultiPolygon>),
+      responsibleParty: '',
       boundary: feature as Feature<Polygon | MultiPolygon>,
     }));
 }
 
 export const fieldName = action('fieldName', (oldName: string, newName: string) => {
-  if (!newName) {
+  const trimmedNewName = newName.trim();
+  if (!trimmedNewName) {
     snackbarMessage('Field name cannot be empty');
     return;
   }
 
-  if (state.fields.find(field => field.name === newName && field.name !== oldName)) {
+  if (state.fields.find(field => field.name === trimmedNewName && field.name !== oldName)) {
     snackbarMessage('Field name already exists');
     return;
   }
@@ -914,8 +1023,15 @@ export const fieldName = action('fieldName', (oldName: string, newName: string) 
   const fieldIndex = state.fields.findIndex(field => field.name === oldName);
   if (fieldIndex >= 0) {
     fieldsChanged(true);
-    state.fields[fieldIndex]!.name = newName;
-    state.fields[fieldIndex]!.acreage = nominalFieldAcreage(newName, state.fields[fieldIndex]!.boundary);
+    fields(state.fields.map((field, index) => index === fieldIndex
+      ? {
+          ...field,
+          name: trimmedNewName,
+        }
+      : field));
+    state.pendingBoundaryFieldNames = state.pendingBoundaryFieldNames.map(fieldName => (
+      fieldName === oldName ? trimmedNewName : fieldName
+    ));
   }
 });
 
@@ -923,11 +1039,53 @@ export const fieldBoundary = action('fieldBoundary', (name: string, boundary: Fi
   const fieldIndex = state.fields.findIndex(field => field.name === name);
   if (fieldIndex >= 0) {
     fieldsChanged(true);
-    state.fields[fieldIndex]!.boundary = boundary;
-    state.fields[fieldIndex]!.acreage = nominalFieldAcreage(state.fields[fieldIndex]!.name, boundary);
+    fields(state.fields.map((field, index) => index === fieldIndex
+      ? {
+          ...field,
+          boundary,
+        }
+      : field));
+    state.pendingBoundaryFieldNames = state.pendingBoundaryFieldNames.filter(fieldName => fieldName !== name);
   } else {
     info('Could not find field with name %s', name);
   }
+});
+
+export const fieldAcreage = action('fieldAcreage', (name: string, value: number) => {
+  if (!Number.isFinite(value)) {
+    snackbarMessage('Field acreage must be a valid number');
+    return;
+  }
+
+  const fieldIndex = state.fields.findIndex(field => field.name === name);
+  if (fieldIndex < 0) {
+    info('Could not find field with name %s for acreage update', name);
+    return;
+  }
+
+  fieldsChanged(true);
+  fields(state.fields.map((field, index) => index === fieldIndex
+    ? {
+        ...field,
+        acreage: value,
+      }
+    : field));
+});
+
+export const fieldResponsibleParty = action('fieldResponsibleParty', (name: string, value: string) => {
+  const fieldIndex = state.fields.findIndex(field => field.name === name);
+  if (fieldIndex < 0) {
+    info('Could not find field with name %s for responsible party update', name);
+    return;
+  }
+
+  fieldsChanged(true);
+  fields(state.fields.map((field, index) => index === fieldIndex
+    ? {
+        ...field,
+        responsibleParty: value,
+      }
+    : field));
 });
 
 export const fieldDefaultHeadingDegrees = action('fieldDefaultHeadingDegrees', (name: string, value: number | undefined) => {
@@ -939,6 +1097,57 @@ export const fieldDefaultHeadingDegrees = action('fieldDefaultHeadingDegrees', (
 
   fieldsChanged(true);
   state.fields[fieldIndex]!.defaultHeadingDegrees = value;
+});
+
+export const addField = action('addField', () => {
+  const name = nextNewFieldName();
+  const nextField: Field = {
+    name,
+    acreage: 0,
+    responsibleParty: '',
+    boundary: placeholderFieldBoundary(),
+  };
+
+  fieldsChanged(true);
+  fields([ ...state.fields, nextField ]);
+  state.pendingBoundaryFieldNames = [ ...state.pendingBoundaryFieldNames, name ];
+  editingField(name);
+});
+
+export const saveFieldBoundaryFromDraw = action('saveFieldBoundaryFromDraw', (boundary: Field['boundary']) => {
+  if (!state.draw.targetField) {
+    snackbarMessage('Choose a field before saving a boundary.');
+    return;
+  }
+
+  fieldBoundary(state.draw.targetField, boundary);
+  closeDrawModal();
+  snackbarMessage('Field boundary updated. Save fields to persist it.');
+});
+
+export const deleteField = action('deleteField', (name: string) => {
+  const existingField = state.fields.find(field => field.name === name);
+  if (!existingField) {
+    snackbarMessage(`Field "${name}" not found`);
+    return;
+  }
+
+  fieldsChanged(true);
+  fields(state.fields.filter(field => field.name !== name));
+  state.pendingBoundaryFieldNames = state.pendingBoundaryFieldNames.filter(fieldName => fieldName !== name);
+  persistFieldHeading(name, null);
+
+  if (state.editingField === name) {
+    editingField('');
+  }
+  if (state.load.field === name) {
+    load({ field: '' });
+  }
+  if (state.draw.targetField === name) {
+    closeDrawModal();
+  }
+
+  snackbarMessage(`Removed field "${name}". Save Fields to persist.`);
 });
 
 export const plusLoad = action('plusLoad', async () => {
@@ -956,12 +1165,24 @@ export const plusLoad = action('plusLoad', async () => {
     };
     nextLoad = { ...state.load };
   });
-
-  const savedLoad = await saveLoad(nextLoad);
-  if (savedLoad && state.draw.enabled) {
-    const loadGroupKey = createLoadGroupKey(savedLoad);
-    openDrawModalForLoadGroups([ loadGroupKey ], 'load', {
-      [loadGroupKey]: 1,
+  activityOverlayState({
+    open: true,
+    title: state.draw.enabled ? 'Opening draw' : 'Recording load',
+    message: state.draw.enabled
+      ? 'Saving the load and preparing the draw modal…'
+      : 'Saving the load…',
+  });
+  try {
+    const savedLoad = await saveLoad(nextLoad);
+    if (savedLoad && state.draw.enabled) {
+      const loadGroupKey = createLoadGroupKey(savedLoad);
+      openDrawModalForLoadGroups([ loadGroupKey ], 'load');
+    }
+  } finally {
+    activityOverlayState({
+      open: false,
+      title: '',
+      message: '',
     });
   }
 });

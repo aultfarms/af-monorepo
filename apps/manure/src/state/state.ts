@@ -41,12 +41,18 @@ export type DrawManagementState = {
   enabled: boolean;
   modalOpen: boolean;
   saving: boolean;
+  purpose: 'region' | 'fieldHeading' | 'fieldBoundary';
   mode: SpreadRegion['mode'];
   targetLoadGroupKeys: string[];
   assignmentLoadCounts: Record<string, number>;
   targetField: string;
   headingDegrees: number | null;
   useDefaultFieldHeading: boolean;
+};
+export type ActivityOverlayState = {
+  open: boolean;
+  title: string;
+  message: string;
 };
 
 export type State = {
@@ -71,6 +77,7 @@ export type State = {
   mode: 'loads' | 'fields';
   editingField: string;
   fieldsChanged: boolean;
+  pendingBoundaryFieldNames: string[];
   loads: LoadsRecord[];
   previousLoads: LoadsRecord[];
   fields: Field[];
@@ -95,6 +102,7 @@ export type State = {
     deleting: boolean;
   };
   draw: DrawManagementState;
+  activityOverlay: ActivityOverlayState;
   lookupManagement: {
     sourceModalOpen: boolean;
     driverModalOpen: boolean;
@@ -171,12 +179,21 @@ function emptyDrawManagementState(): DrawManagementState {
     enabled: false,
     modalOpen: false,
     saving: false,
+    purpose: 'region',
     mode: 'load',
     targetLoadGroupKeys: [],
     assignmentLoadCounts: {},
     targetField: '',
     headingDegrees: null,
     useDefaultFieldHeading: true,
+  };
+}
+
+function emptyActivityOverlayState(): ActivityOverlayState {
+  return {
+    open: false,
+    title: '',
+    message: '',
   };
 }
 
@@ -230,6 +247,7 @@ export const state = observable<State>({
   mode: 'loads',
   editingField: '',
   fieldsChanged: false,
+  pendingBoundaryFieldNames: [],
   loads: [],
   previousLoads: [],
   fields: [],
@@ -254,6 +272,7 @@ export const state = observable<State>({
     deleting: false,
   },
   draw: emptyDrawManagementState(),
+  activityOverlay: emptyActivityOverlayState(),
   lookupManagement: {
     sourceModalOpen: false,
     driverModalOpen: false,

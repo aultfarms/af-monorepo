@@ -4,6 +4,7 @@ export type FieldSheetRow = {
   id: string;
   name: string;
   acreage: number;
+  responsibleParty: string;
   boundary: string;
 };
 
@@ -34,6 +35,7 @@ export function fieldToSheetRow(field: Field): FieldSheetRow {
     id: field.id || '',
     name: field.name,
     acreage: field.acreage,
+    responsibleParty: field.responsibleParty,
     boundary: JSON.stringify(field.boundary),
   };
 }

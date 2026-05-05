@@ -52,7 +52,7 @@ export const NavBar = observer(() => {
         >
           <MenuItem disabled>{state.auth.email}</MenuItem>
           <MenuItem onClick={() => { actions.mode(state.mode === 'loads' ? 'fields' : 'loads'); handleMenuClose(); }}>
-            Manage {state.mode === 'loads' ? 'Fields' : 'Loads'}
+            {state.mode === 'fields' ? 'Close Field Manager' : 'Manage Fields'}
           </MenuItem>
           <MenuItem onClick={() => { actions.openHistoryModal(); handleMenuClose(); }}>
             History

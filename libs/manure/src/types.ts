@@ -67,6 +67,7 @@ export type Field = AuditFields & {
   id?: string;
   name: string;
   acreage: number;
+  responsibleParty: string;
   boundary: Feature<Polygon | MultiPolygon>;
   defaultHeadingDegrees?: number;
 };
@@ -103,6 +104,7 @@ export function assertField(o: unknown): asserts o is Field {
   if (typeof field.id !== 'undefined' && typeof field.id !== 'string') throw new Error('Expected Field.id to be a string if it exists');
   if (typeof field.name !== 'string') throw new Error('Expected Field.name to be a string');
   if (typeof field.acreage !== 'number' || !Number.isFinite(field.acreage)) throw new Error('Expected Field.acreage to be a finite number');
+  if (typeof field.responsibleParty !== 'string') throw new Error('Expected Field.responsibleParty to be a string');
   if (typeof field.boundary !== 'object') throw new Error('Expected Field.boundary to be a GeoJSON object');
   if (field.boundary.type !== 'Feature') throw new Error('Expected Field.boundary to be a Feature');
   if (field.boundary.geometry.type !== 'Polygon' && field.boundary.geometry.type !== 'MultiPolygon') {

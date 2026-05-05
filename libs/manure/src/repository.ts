@@ -39,7 +39,7 @@ const SPREAD_REGIONS_COLLECTION = 'regions';
 const SPREAD_REGION_ASSIGNMENTS_COLLECTION = 'regionAssignments';
 const DEFAULT_SOURCE_SPREAD_WIDTH_FEET = 40;
 const DEFAULT_SOURCE_LOAD_LENGTH_FEET = 500;
-const CURRENT_MANURE_SCHEMA_VERSION = 2;
+const CURRENT_MANURE_SCHEMA_VERSION = 3;
 
 type MetadataCollectionName = typeof METADATA_COLLECTIONS[number];
 type StoredFieldDocument = Omit<Field, 'id' | 'boundary'> & {
@@ -437,7 +437,10 @@ function toField(snapshot: QueryDocumentSnapshot<DocumentData>): Field {
   return {
     id: snapshot.id,
     ...data,
-    acreage: nominalFieldAcreage(data.name, boundary),
+    acreage: typeof data.acreage === 'number' && Number.isFinite(data.acreage)
+      ? data.acreage
+      : nominalFieldAcreage(data.name, boundary),
+    responsibleParty: typeof data.responsibleParty === 'string' ? data.responsibleParty : '',
     boundary,
   };
 }
@@ -603,7 +606,7 @@ async function migrateYearSchemaIfNeeded(
     source.spreadWidthFeet !== data.sources[index]?.spreadWidthFeet
     || source.defaultLoadLengthFeet !== data.sources[index]?.defaultLoadLengthFeet
   ));
-  const fieldsNeedMigration = data.fields.some(field => typeof field.defaultHeadingDegrees === 'undefined');
+  const fieldsNeedMigration = currentSchemaVersion < 3 || data.fields.some(field => typeof field.defaultHeadingDegrees === 'undefined');
   const schemaNeedsMigration = currentSchemaVersion < CURRENT_MANURE_SCHEMA_VERSION;
 
   if (!sourcesNeedMigration && !fieldsNeedMigration && !schemaNeedsMigration) {
@@ -627,6 +630,7 @@ async function migrateYearSchemaIfNeeded(
       batch.set(doc(metadataCollectionRef(year, 'fields'), field.id!), stripUndefined({
         name: field.name,
         acreage: field.acreage,
+        responsibleParty: field.responsibleParty,
         boundary: serializeFieldBoundary(field.boundary),
         defaultHeadingDegrees: field.defaultHeadingDegrees,
         createdAt: field.createdAt || timestamp,
@@ -743,10 +747,13 @@ export async function saveFields(year: number, fields: Field[], actorEmail: stri
 
   const normalizedFields = fields.map((field) => {
     const timestamp = nowIso();
-    const acreage = nominalFieldAcreage(field.name, field.boundary);
+    const acreage = Number.isFinite(field.acreage)
+      ? field.acreage
+      : nominalFieldAcreage(field.name, field.boundary);
     return {
       ...field,
       acreage,
+      responsibleParty: typeof field.responsibleParty === 'string' ? field.responsibleParty : '',
       id: field.id || makeEntityId('field'),
       createdAt: field.createdAt || timestamp,
       updatedAt: timestamp,
@@ -772,6 +779,7 @@ export async function saveFields(year: number, fields: Field[], actorEmail: stri
     batch.set(doc(metadataCollectionRef(year, 'fields'), field.id!), stripUndefined({
       name: field.name,
       acreage: field.acreage,
+      responsibleParty: field.responsibleParty,
       boundary: serializeFieldBoundary(field.boundary),
       defaultHeadingDegrees: field.defaultHeadingDegrees,
       createdAt: field.createdAt,

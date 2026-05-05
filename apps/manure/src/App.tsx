@@ -1,6 +1,6 @@
 import React from 'react';
 import { observer } from 'mobx-react-lite';
-import { Box, Button, Snackbar, Typography } from '@mui/material';
+import { Box, Button, CircularProgress, Modal, Snackbar, Typography, useMediaQuery } from '@mui/material';
 import { NavBar } from './NavBar';
 import { Map } from './Map';
 import { LoadForm } from './LoadForm';
@@ -18,6 +18,7 @@ import './App.css';
 
 export const App = observer(() => {
   const { state, actions } = React.useContext(context);
+  const isLandscape = useMediaQuery('(orientation: landscape)');
 
   if (state.loading && state.auth.status === 'checking') {
     return <LoadingIndicator />;
@@ -95,19 +96,53 @@ export const App = observer(() => {
                   <Map />
                 </div>
                 <div className="form-wrapper">
-                  {state.mode === 'loads' ? <LoadForm /> : <FieldsForm />}
+                  <LoadForm />
                 </div>
               </React.Fragment>
             )}
       </div>
 
       <AccessManagementModal />
+      <FieldsForm />
       <HistoryModal />
       <SourceManagementModal />
       <DriverManagementModal />
       <DrawModal />
-      <div style={{ height: '3em' }} />
-      <BottomLoadButton />
+      <Modal open={state.activityOverlay.open}>
+        <Box
+          sx={{
+            position: 'absolute',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            bgcolor: 'background.paper',
+            borderRadius: 2,
+            boxShadow: 24,
+            px: 3,
+            py: 2.5,
+            minWidth: 'min(360px, calc(100vw - 32px))',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: 1.25,
+            textAlign: 'center',
+          }}
+        >
+          <CircularProgress size={42} />
+          <Typography variant="h6">
+            {state.activityOverlay.title || 'Working…'}
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            {state.activityOverlay.message || 'Please wait…'}
+          </Typography>
+        </Box>
+      </Modal>
+      {!isLandscape && (
+        <React.Fragment>
+          <div style={{ height: '3em' }} />
+          <BottomLoadButton />
+        </React.Fragment>
+      )}
       <Snackbar
         anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
         open={state.snackbar.open}
