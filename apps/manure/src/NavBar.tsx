@@ -72,6 +72,11 @@ export const NavBar = observer(() => {
               Manage Drivers
             </MenuItem>
           )}
+          {state.auth.admin && (
+            <MenuItem onClick={() => { actions.openRestoreBackupModal(); handleMenuClose(); }}>
+              Restore Manure Backup
+            </MenuItem>
+          )}
           <MenuItem onClick={() => { actions.signOut(); handleMenuClose(); }}>
             Sign out
           </MenuItem>

@@ -39,7 +39,7 @@ export const NavBar = observer(() => {
           </IconButton>
         </Tooltip>
         <Tooltip title="Refresh board">
-          <IconButton color="inherit" onClick={() => actions.loadBoard(true)}>
+          <IconButton color="inherit" onClick={() => actions.refreshBoard('manual')}>
             <RefreshIcon />
           </IconButton>
         </Tooltip>
@@ -64,7 +64,7 @@ export const NavBar = observer(() => {
           <MenuItem onClick={() => { actions.showAllFieldsOnMap(); setAnchorEl(null); }}>
             Fit all fields
           </MenuItem>
-          <MenuItem onClick={() => { actions.loadBoard(true); setAnchorEl(null); }}>
+          <MenuItem onClick={() => { actions.refreshBoard('manual'); setAnchorEl(null); }}>
             Refresh board
           </MenuItem>
           <MenuItem onClick={() => { actions.openIssuesModal(); setAnchorEl(null); }}>

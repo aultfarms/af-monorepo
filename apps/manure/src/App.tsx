@@ -12,6 +12,8 @@ import { DriverManagementModal } from './DriverManagementModal';
 import { DrawModal } from './DrawModal';
 import { BottomLoadButton } from './BottomLoadButton';
 import { LoadingIndicator } from './LoadingIndicator';
+import { MigrationModal } from './MigrationModal';
+import { RestoreBackupModal } from './RestoreBackupModal';
 import { context } from './state';
 
 import './App.css';
@@ -79,6 +81,32 @@ export const App = observer(() => {
     );
   }
 
+  if (state.auth.status === 'signed_in' && state.migration.required && !state.auth.admin) {
+    return (
+      <Box sx={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', p: 4, textAlign: 'center' }}>
+        <Box sx={{ maxWidth: 640 }}>
+          <Typography variant="h4" gutterBottom>
+            Migration required
+          </Typography>
+          <Typography sx={{ mb: 2 }}>
+            An admin needs to upgrade the manure database before this app can load.
+          </Typography>
+          <Typography color="text.secondary" sx={{ mb: 3 }}>
+            {state.migration.currentVersion || 'legacy'} → {state.migration.targetVersion || 'current'}
+          </Typography>
+          {state.migration.error && (
+            <Typography color="error" sx={{ mb: 2 }}>
+              {state.migration.error}
+            </Typography>
+          )}
+          <Button variant="contained" color="primary" onClick={actions.signOut}>
+            Use a different account
+          </Button>
+        </Box>
+      </Box>
+    );
+  }
+
   return (
     <div className="main">
       <NavBar />
@@ -108,6 +136,8 @@ export const App = observer(() => {
       <SourceManagementModal />
       <DriverManagementModal />
       <DrawModal />
+      <MigrationModal />
+      <RestoreBackupModal />
       <Modal open={state.activityOverlay.open}>
         <Box
           sx={{

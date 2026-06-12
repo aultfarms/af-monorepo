@@ -699,15 +699,12 @@ function parseOptionalNumber(value: string): number | null {
   return Number.isFinite(parsedValue) ? parsedValue : null;
 }
 
-function clampAssignmentLoadCount(value: number, totalLoads: number): number {
-  return Math.max(0, Math.min(totalLoads, Math.round(value)));
+function clampAssignmentLoadCount(value: number, availableLoads: number): number {
+  return Math.max(0, Math.min(availableLoads, Math.round(value)));
 }
 
 function defaultAssignmentLoadCount(group: LoadGroupSummary): number {
-  return clampAssignmentLoadCount(
-    group.unassignedLoads > 0 ? group.unassignedLoads : group.totalLoads,
-    group.totalLoads,
-  );
+  return clampAssignmentLoadCount(group.unassignedLoads, group.unassignedLoads);
 }
 
 function isDateWithinRange(date: string, dateStart: string, dateEnd: string): boolean {
@@ -745,7 +742,7 @@ function assignmentDraftRows(
     ...group,
     selectedLoadCount: clampAssignmentLoadCount(
       assignmentLoadCounts[group.loadGroupKey] ?? defaultAssignmentLoadCount(group),
-      group.totalLoads,
+      group.unassignedLoads,
     ),
   }));
 }
@@ -988,8 +985,8 @@ export const DrawModal = observer(() => {
   const isFieldBoundaryPurpose = state.draw.purpose === 'fieldBoundary';
   const showsRegionControls = !isFieldHeadingPurpose && !isFieldBoundaryPurpose;
   const groupedLoadsByKey = React.useMemo(
-    () => summarizeLoadGroupsByKey(state.loads, state.regionAssignments, state.thisYear),
-    [state.loads, state.regionAssignments, state.thisYear],
+    () => summarizeLoadGroupsByKey(state.loads, state.regions, state.thisYear),
+    [state.loads, state.regions, state.thisYear],
   );
   const selectedGroups = React.useMemo(
     () => state.draw.targetLoadGroupKeys
@@ -1045,22 +1042,31 @@ export const DrawModal = observer(() => {
     [fitBoundary, state.mapView.center],
   );
   const regionLoadGroupKeysById = React.useMemo(() => {
+    const loadGroupKeyByLoadId = new Map<string, string>();
+    for (const group of groupedLoadsByKey.values()) {
+      for (const loadId of group.loadIds) {
+        loadGroupKeyByLoadId.set(loadId, group.loadGroupKey);
+      }
+    }
     const nextMap = new Map<string, string[]>();
-    for (const assignment of state.regionAssignments) {
-      if (!assignment.regionId) {
+    for (const region of state.regions) {
+      if (!region.id) {
         continue;
       }
-      if (targetField && assignment.field !== targetField.name) {
+      if (targetField && region.field !== targetField.name) {
         continue;
       }
-      const existing = nextMap.get(assignment.regionId) ?? [];
-      if (!existing.includes(assignment.loadGroupKey)) {
-        existing.push(assignment.loadGroupKey);
+      const existing = nextMap.get(region.id) ?? [];
+      for (const loadId of region.loadIds || []) {
+        const loadGroupKey = loadGroupKeyByLoadId.get(loadId);
+        if (loadGroupKey && !existing.includes(loadGroupKey)) {
+          existing.push(loadGroupKey);
+        }
       }
-      nextMap.set(assignment.regionId, existing);
+      nextMap.set(region.id, existing);
     }
     return nextMap;
-  }, [state.regionAssignments, targetField]);
+  }, [groupedLoadsByKey, state.regions, targetField]);
 
   const [fitKey, setFitKey] = React.useState(0);
   const [polygonCoordinates, setPolygonCoordinates] = React.useState<Coordinate[]>([]);
@@ -1086,12 +1092,12 @@ export const DrawModal = observer(() => {
   } | null>(null);
   const fieldGroupsInRange = React.useMemo(
     () => showsRegionControls && targetField
-      ? summarizeLoadGroups(state.loads, state.regionAssignments, state.thisYear).filter(group => (
+      ? summarizeLoadGroups(state.loads, state.regions, state.thisYear).filter(group => (
         group.field === targetField.name
         && isDateWithinRange(group.date, dateStart, dateEnd)
       ))
       : [],
-    [dateEnd, dateStart, showsRegionControls, state.loads, state.regionAssignments, state.thisYear, targetField],
+    [dateEnd, dateStart, showsRegionControls, state.loads, state.regions, state.thisYear, targetField],
   );
   const assignmentRows = React.useMemo(
     () => assignmentDraftRows(
@@ -1526,7 +1532,7 @@ export const DrawModal = observer(() => {
     }
     actions.setDrawAssignmentLoadCount(
       row.loadGroupKey,
-      clampAssignmentLoadCount(parsedValue, row.totalLoads),
+      clampAssignmentLoadCount(parsedValue, row.unassignedLoads),
     );
   }, [actions]);
   const handleAssignmentToggle = React.useCallback((row: LoadGroupSummary, checked: boolean) => {
@@ -1889,7 +1895,7 @@ export const DrawModal = observer(() => {
                           variant="standard"
                           disabled={row.selectedLoadCount < 1}
                           onChange={event => handleAssignmentLoadCountChange(row, event.target.value)}
-                          inputProps={{ min: 0, max: row.totalLoads, step: 1 }}
+                          inputProps={{ min: 0, max: row.unassignedLoads, step: 1 }}
                           sx={{
                             width: 36,
                             '& .MuiInputBase-input': {

@@ -18,6 +18,9 @@ export type AuditFields = {
 
 export type LoadsRecord = AuditFields & {
   id?: string;
+  timestamp?: string;
+  loggedBy?: string;
+  legacyLoadRecordId?: string;
   date: string;
   field: string;
   source: string;
@@ -30,6 +33,9 @@ export function assertLoadsRecord(o: unknown): asserts o is LoadsRecord {
   if (!o || typeof o !== 'object') throw new Error('Expected LoadsRecord to be a truthy object');
   const record = o as LoadsRecord;
   if (typeof record.id !== 'undefined' && typeof record.id !== 'string') throw new Error('Expected LoadsRecord.id to be a string if it exists');
+  if (typeof record.timestamp !== 'undefined' && typeof record.timestamp !== 'string') throw new Error('Expected LoadsRecord.timestamp to be a string if it exists');
+  if (typeof record.loggedBy !== 'undefined' && typeof record.loggedBy !== 'string') throw new Error('Expected LoadsRecord.loggedBy to be a string if it exists');
+  if (typeof record.legacyLoadRecordId !== 'undefined' && typeof record.legacyLoadRecordId !== 'string') throw new Error('Expected LoadsRecord.legacyLoadRecordId to be a string if it exists');
   if (typeof record.date !== 'string') throw new Error(`Expected LoadsRecord.date (${String(record.date)}) to be a string`);
   if (typeof record.field !== 'string') throw new Error('Expected LoadsRecord.field to be a string');
   if (typeof record.source !== 'string') throw new Error('Expected LoadsRecord.source to be a string');
@@ -185,6 +191,7 @@ export type SpreadRegion = AuditFields & {
   id?: string;
   field: string;
   mode: SpreadRegionMode;
+  loadIds?: string[];
   polygon: Feature<Polygon | MultiPolygon>;
   centerline?: Feature<LineString>;
   headingDegrees?: number;
@@ -200,6 +207,12 @@ export function assertSpreadRegion(o: unknown): asserts o is SpreadRegion {
   if (typeof region.id !== 'undefined' && typeof region.id !== 'string') throw new Error('Expected SpreadRegion.id to be a string if it exists');
   if (typeof region.field !== 'string') throw new Error('Expected SpreadRegion.field to be a string');
   if (region.mode !== 'load' && region.mode !== 'polygon') throw new Error('Expected SpreadRegion.mode to be \"load\" or \"polygon\"');
+  if (typeof region.loadIds !== 'undefined') {
+    if (!Array.isArray(region.loadIds)) throw new Error('Expected SpreadRegion.loadIds to be an array if it exists');
+    for (const loadId of region.loadIds) {
+      if (typeof loadId !== 'string') throw new Error('Expected SpreadRegion.loadIds entries to be strings');
+    }
+  }
   if (!region.polygon || typeof region.polygon !== 'object') throw new Error('Expected SpreadRegion.polygon to be a GeoJSON feature');
   if (region.polygon.type !== 'Feature') throw new Error('Expected SpreadRegion.polygon to be a Feature');
   if (region.polygon.geometry.type !== 'Polygon' && region.polygon.geometry.type !== 'MultiPolygon') {
@@ -287,7 +300,6 @@ export type ManureAppData = {
   drivers: Driver[];
   loads: LoadsRecord[];
   regions: SpreadRegion[];
-  regionAssignments: SpreadRegionAssignment[];
   previousLoads: LoadsRecord[];
 };
 

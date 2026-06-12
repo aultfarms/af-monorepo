@@ -8,6 +8,7 @@ import L from 'leaflet';
 import debug from 'debug';
 import type { Feature, Geometry } from 'geojson';
 import { createLoadGroupKey } from '@aultfarms/manure';
+import { summarizeLoadGroupsByKey } from './loadGroups';
 import {
   EXISTING_SPREAD_REGION_BORDER_COLOR,
   EXISTING_SPREAD_REGION_FILL_COLOR,
@@ -78,24 +79,24 @@ export const Map = observer(() => {
   const currentLoadGroupKey = state.load.date && state.load.field && state.load.source
     ? createLoadGroupKey(state.load)
     : '';
+  const groupedLoadsByKey = React.useMemo(
+    () => summarizeLoadGroupsByKey(state.loads, state.regions, state.thisYear),
+    [state.loads, state.regions, state.thisYear],
+  );
   const selectedRegionIds = React.useMemo(() => {
     const selectedGroupKeys = new Set([
       ...state.historyManagement.selectedLoadGroupKeys,
       ...state.draw.targetLoadGroupKeys,
     ]);
     return new Set(
-      state.regionAssignments
-        .filter(assignment => selectedGroupKeys.has(assignment.loadGroupKey))
-        .map(assignment => assignment.regionId),
+      [ ...selectedGroupKeys ]
+        .flatMap(loadGroupKey => groupedLoadsByKey.get(loadGroupKey)?.regionIds || []),
     );
-  }, [state.draw.targetLoadGroupKeys, state.historyManagement.selectedLoadGroupKeys, state.regionAssignments]);
-  const currentRegionIds = React.useMemo(() => (
-    new Set(
-      state.regionAssignments
-        .filter(assignment => assignment.loadGroupKey === currentLoadGroupKey)
-        .map(assignment => assignment.regionId),
-    )
-  ), [currentLoadGroupKey, state.regionAssignments]);
+  }, [groupedLoadsByKey, state.draw.targetLoadGroupKeys, state.historyManagement.selectedLoadGroupKeys]);
+  const currentRegionIds = React.useMemo(
+    () => new Set(groupedLoadsByKey.get(currentLoadGroupKey)?.regionIds || []),
+    [currentLoadGroupKey, groupedLoadsByKey],
+  );
   const selectedFieldRegionsGeoJson = React.useMemo(() => ({
     type: 'FeatureCollection' as const,
     features: state.regions

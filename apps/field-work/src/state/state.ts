@@ -69,6 +69,18 @@ export type AppIssue = {
   message: string;
   count: number;
 };
+export type FieldBoundaryEditorState = {
+  open: boolean;
+  fieldName: string;
+};
+export type BoardRefreshState = {
+  lastLoadedAt: number;
+  lastCheckedAt: number;
+  lastAttemptAt: number;
+  lastKnownBoardActivityAt: string;
+  checkInFlight: boolean;
+  pendingRemoteChange: boolean;
+};
 
 export type State = {
   loading: boolean;
@@ -103,6 +115,8 @@ export type State = {
   trelloDiagnostics: TrelloDiagnostics;
   issuesModalOpen: boolean;
   issues: AppIssue[];
+  fieldBoundaryEditor: FieldBoundaryEditorState;
+  boardRefresh: BoardRefreshState;
   fieldModal: {
     open: boolean;
     fieldName: string;
@@ -194,6 +208,18 @@ export const state = observable<State>({
   },
   issuesModalOpen: false,
   issues: [],
+  fieldBoundaryEditor: {
+    open: false,
+    fieldName: '',
+  },
+  boardRefresh: {
+    lastLoadedAt: 0,
+    lastCheckedAt: 0,
+    lastAttemptAt: 0,
+    lastKnownBoardActivityAt: '',
+    checkInFlight: false,
+    pendingRemoteChange: false,
+  },
   fieldModal: {
     open: false,
     fieldName: '',

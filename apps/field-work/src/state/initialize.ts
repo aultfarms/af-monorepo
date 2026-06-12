@@ -1,12 +1,42 @@
 import pkg from '../../package.json';
-import { clearTrelloDiagnostics, loadBoard, loadTrelloDiagnostics, setTrelloAuthorized, trello, loading, loadingError } from './actions';
+import {
+  clearTrelloDiagnostics,
+  loadTrelloDiagnostics,
+  setTrelloAuthorized,
+  trello,
+  loading,
+  loadingError,
+  maybeAutoRefreshBoard,
+  refreshBoard,
+} from './actions';
 import { state } from './state';
 import * as trellolib from '@aultfarms/trello';
 import debug from 'debug';
 
 const info = debug('af/field-work#initialize:info');
+const AUTO_REFRESH_POLL_MS = 60 * 1000;
 
 let initialized = false;
+let autoRefreshRegistered = false;
+
+function registerAutoRefreshHandlers(): void {
+  if (autoRefreshRegistered || typeof window === 'undefined' || typeof document === 'undefined') {
+    return;
+  }
+  autoRefreshRegistered = true;
+
+  const checkForRefresh = () => {
+    void maybeAutoRefreshBoard();
+  };
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      checkForRefresh();
+    }
+  });
+  window.addEventListener('focus', checkForRefresh);
+  window.setInterval(checkForRefresh, AUTO_REFRESH_POLL_MS);
+}
 
 export const initialize = async () => {
   if (initialized) {
@@ -15,6 +45,7 @@ export const initialize = async () => {
   initialized = true;
 
   document.title = `AF/Field Work - v${pkg.version}`;
+  registerAutoRefreshHandlers();
 
   info('Checking Trello authorization');
   const authorized = await trellolib.checkAuthorization();
@@ -29,10 +60,11 @@ export const initialize = async () => {
     await trello();
     setTrelloAuthorized(true);
     clearTrelloDiagnostics();
-    await loadBoard();
+    await refreshBoard('startup');
     if (!state.board) {
       setTrelloAuthorized(false);
       await loadTrelloDiagnostics();
+      return;
     }
   } catch (error) {
     setTrelloAuthorized(false);

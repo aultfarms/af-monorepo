@@ -1,29 +1,31 @@
 import { action, runInAction } from 'mobx';
+import pkg from '../../package.json';
 import {
-  createLoadRecordId,
   createLoadGroupKey,
   assertDrivers,
   assertFields,
   assertLoadsRecords,
-  assertSpreadRegionAssignments,
   assertSpreadRegions,
   assertSources,
+  appendToLoadRecord,
   deleteAccessRecord as removeAccessRecord,
-  deleteLoadRecords as removeLoadRecords,
-  deleteSpreadRegionAssignments as removeSpreadRegionAssignments,
-  deleteSpreadRegions as removeSpreadRegions,
+  deleteLoadHistoryBundle,
   emptyLoadRecord,
   getAccessRecord,
   isAccessEnabled,
-  listAccessRecords,
   loadManureAppData,
   nominalFieldAcreage,
+  observeAccessRecord,
+  observeAccessRecords,
+  observeDrivers,
+  observeFields,
+  observeLoads,
+  observeSources,
+  observeSpreadRegions,
   saveAccessRecord as persistAccessRecord,
   saveDrivers as persistDrivers,
   saveFields as persistFields,
-  saveLoadRecord,
-  saveSpreadRegionAssignments as persistSpreadRegionAssignments,
-  saveSpreadRegions as persistSpreadRegions,
+  saveSpreadRegionWithLoadIds,
   saveSources as persistSources,
   type AccessRecord,
   type Driver,
@@ -34,9 +36,20 @@ import {
   type LoadsRecordGeoJSONProps,
   type Source,
   type SpreadRegion,
-  type SpreadRegionAssignment,
 } from '@aultfarms/manure';
-import { getCurrentUser, signInWithGoogle, signOutBrowserUser } from '@aultfarms/firebase';
+import {
+  createManureBackupPayload,
+  getBrowserFirebase,
+  getCurrentUser,
+  getManureMigrationStatus,
+  restoreManureBackupPayload,
+  runPendingManureMigrations,
+  signInWithGoogle,
+  signOutBrowserUser,
+  type FirebaseJsonObject,
+  type FirebaseManureBackupManifest,
+  type FirebaseManureBackupPayload,
+} from '@aultfarms/firebase';
 import type { Feature, FeatureCollection, MultiPolygon, Point, Polygon } from 'geojson';
 import JSZip from 'jszip';
 import * as toGeoJSON from '@tmcw/togeojson';
@@ -50,6 +63,7 @@ import { state, type State } from './state';
 
 const info = debug('af/manure:info');
 const warn = debug('af/manure:warn');
+const MANURE_APP_VERSION = pkg.version;
 
 function createLoadPoint(current: State['currentGPS']): Feature<Point> {
   return point([ current.lon, current.lat ]);
@@ -104,15 +118,6 @@ function nextBlankLoad(): LoadsRecord {
   };
 }
 
-function mergeOrAppendLoad(nextLoad: LoadsRecord): LoadsRecord[] {
-  const existingIndex = state.loads.findIndex(loadRecord => loadRecord.id === nextLoad.id);
-  if (existingIndex >= 0) {
-    return state.loads.map((loadRecord, index) => index === existingIndex ? nextLoad : loadRecord);
-  }
-
-  return [ ...state.loads, nextLoad ];
-}
-
 function nextBlankAccessDraft(): State['accessManagement']['draft'] {
   return {
     email: '',
@@ -164,6 +169,573 @@ function cloneSources(sourcesList: Source[]): Source[] {
 
 function cloneDrivers(driversList: Driver[]): Driver[] {
   return driversList.map(driver => ({ ...driver }));
+}
+
+function cloneFields(fieldsList: Field[]): Field[] {
+  return JSON.parse(JSON.stringify(fieldsList)) as Field[];
+}
+
+function cloneAccessRecords(records: AccessRecord[]): AccessRecord[] {
+  return records.map(record => ({ ...record }));
+}
+
+function stableEquals(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+function safeBackupTimestamp(value: string): string {
+  return value.replace(/[:.]/g, '-');
+}
+
+function backupFileName(manifest: FirebaseManureBackupManifest): string {
+  const targetVersion = manifest.targetVersion || MANURE_APP_VERSION;
+  return `manure-backup-pre-${targetVersion}-${safeBackupTimestamp(manifest.createdAt)}.zip`;
+}
+
+function appendMigrationLog(message: string): void {
+  runInAction(() => {
+    state.migration.logs = [ ...state.migration.logs, message ];
+  });
+}
+
+function downloadBlob(blob: Blob, fileName: string): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+function isJsonObject(value: unknown): value is FirebaseJsonObject {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseJsonObject(text: string, path: string): FirebaseJsonObject {
+  const parsedValue = JSON.parse(text) as unknown;
+  if (!isJsonObject(parsedValue)) {
+    throw new Error(`${path} must contain a JSON object.`);
+  }
+  return parsedValue;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) && value.every(entry => typeof entry === 'string')
+    ? value
+    : [];
+}
+
+function parseBackupManifest(value: FirebaseJsonObject): FirebaseManureBackupManifest {
+  if (value.format !== 'aultfarms.manure.backup' || value.formatVersion !== 1) {
+    throw new Error('The selected file is not a supported manure backup.');
+  }
+  if (
+    typeof value.createdAt !== 'string'
+    || typeof value.projectId !== 'string'
+    || typeof value.appVersion !== 'string'
+    || typeof value.adminEmail !== 'string'
+    || !(typeof value.currentVersion === 'string' || value.currentVersion === null)
+    || !(typeof value.targetVersion === 'string' || value.targetVersion === null)
+  ) {
+    throw new Error('The selected manure backup manifest is malformed.');
+  }
+
+  return {
+    format: 'aultfarms.manure.backup',
+    formatVersion: 1,
+    createdAt: value.createdAt,
+    projectId: value.projectId,
+    appVersion: value.appVersion,
+    adminEmail: value.adminEmail,
+    currentVersion: value.currentVersion,
+    targetVersion: value.targetVersion,
+    pendingVersions: stringArray(value.pendingVersions),
+    filePaths: stringArray(value.filePaths),
+    collectionPaths: stringArray(value.collectionPaths),
+    yearIds: stringArray(value.yearIds),
+  };
+}
+
+function restoreSummaryFromManifest(manifest: FirebaseManureBackupManifest): State['migration']['restoreSummary'] {
+  return {
+    createdAt: manifest.createdAt,
+    projectId: manifest.projectId,
+    appVersion: manifest.appVersion,
+    adminEmail: manifest.adminEmail,
+    currentVersion: manifest.currentVersion,
+    targetVersion: manifest.targetVersion,
+    pendingVersions: manifest.pendingVersions,
+    yearIds: manifest.yearIds,
+    collectionCount: manifest.collectionPaths.length,
+  };
+}
+
+async function createBackupZipBlob(payload: FirebaseManureBackupPayload): Promise<Blob> {
+  const zip = new JSZip();
+  for (const file of payload.files) {
+    zip.file(file.path, JSON.stringify(file.content, null, 2));
+  }
+
+  return zip.generateAsync({
+    type: 'blob',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 9 },
+  });
+}
+
+async function readBackupPayloadFromZip(file: File): Promise<FirebaseManureBackupPayload> {
+  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+  const jsonEntries = Object.values(zip.files)
+    .filter(entry => !entry.dir && entry.name.endsWith('.json'));
+  if (jsonEntries.length < 1) {
+    throw new Error('The selected ZIP does not contain any JSON backup files.');
+  }
+
+  const files = await Promise.all(jsonEntries.map(async (entry) => ({
+    path: entry.name,
+    content: parseJsonObject(await entry.async('text'), entry.name),
+  })));
+  const manifestFile = files.find(entry => entry.path === 'manifest.json');
+  if (!manifestFile) {
+    throw new Error('The selected ZIP is missing manifest.json.');
+  }
+
+  return {
+    manifest: parseBackupManifest(manifestFile.content),
+    files,
+  };
+}
+
+function isBlankSourceDraft(
+  draft: State['lookupManagement']['sourceDraft'] = state.lookupManagement.sourceDraft,
+): boolean {
+  return (
+    !draft.name.trim()
+    && draft.type === 'solid'
+    && draft.acPerLoad.trim() === ''
+    && draft.spreadWidthFeet.trim() === '40'
+    && draft.defaultLoadLengthFeet.trim() === '500'
+  );
+}
+
+function isBlankDriverDraft(
+  draft: State['lookupManagement']['driverDraft'] = state.lookupManagement.driverDraft,
+): boolean {
+  return !draft.name.trim();
+}
+
+function isBlankAccessDraft(
+  draft: State['accessManagement']['draft'] = state.accessManagement.draft,
+): boolean {
+  return (
+    !draft.email.trim()
+    && !draft.displayName.trim()
+    && draft.enabled
+    && !draft.admin
+  );
+}
+
+function isFieldDraftDirty(): boolean {
+  return state.fieldsChanged || !stableEquals(state.fields, state.serverFields);
+}
+
+function isSourceDraftDirty(canonicalSources = state.sources): boolean {
+  return (
+    !stableEquals(state.lookupManagement.sources, canonicalSources)
+    || !isBlankSourceDraft()
+  );
+}
+
+function isDriverDraftDirty(canonicalDrivers = state.drivers): boolean {
+  return (
+    !stableEquals(state.lookupManagement.drivers, canonicalDrivers)
+    || !isBlankDriverDraft()
+  );
+}
+
+function isAccessDraftDirty(canonicalRecords = state.accessManagement.serverRecords): boolean {
+  return (
+    !stableEquals(state.accessManagement.records, canonicalRecords)
+    || !isBlankAccessDraft()
+  );
+}
+
+function closeAdminManagementSessions(): void {
+  if (state.lookupManagement.sourceModalOpen) {
+    closeSourceManagementModal();
+  }
+  if (state.lookupManagement.driverModalOpen) {
+    closeDriverManagementModal();
+  }
+  if (state.accessManagement.modalOpen) {
+    closeAccessManagementModal();
+  }
+}
+
+function revalidateHistorySelections(): void {
+
+  const validLoadGroupKeys = new Set(
+    summarizeLoadGroupsByKey(state.loads, state.regions, state.thisYear).keys(),
+  );
+  historyManagementState({
+    selectedLoadGroupKeys: state.historyManagement.selectedLoadGroupKeys.filter(loadGroupKey => (
+      validLoadGroupKeys.has(loadGroupKey)
+    )),
+    expandedLoadGroupKeys: state.historyManagement.expandedLoadGroupKeys.filter(loadGroupKey => (
+      validLoadGroupKeys.has(loadGroupKey)
+    )),
+  });
+}
+
+function revalidateDrawTargets(): void {
+  if (!state.draw.modalOpen || state.draw.purpose !== 'region' || state.draw.targetLoadGroupKeys.length < 1) {
+    return;
+  }
+
+  const groupsByKey = summarizeLoadGroupsByKey(state.loads, state.regions, state.thisYear);
+  const selectedGroups = state.draw.targetLoadGroupKeys
+    .map(loadGroupKey => groupsByKey.get(loadGroupKey))
+    .filter((group): group is NonNullable<typeof group> => !!group);
+
+  if (selectedGroups.length < 1) {
+    closeDrawModal();
+    snackbarMessage('The selected grouped load no longer exists.');
+    return;
+  }
+
+  const targetFieldNames = [ ...new Set(selectedGroups.map(group => group.field)) ];
+  if (targetFieldNames.length !== 1) {
+    closeDrawModal();
+    snackbarMessage('The selected grouped loads no longer belong to one field.');
+    return;
+  }
+
+  drawState({
+    targetLoadGroupKeys: selectedGroups.map(group => group.loadGroupKey),
+    targetField: targetFieldNames[0] || '',
+    assignmentLoadCounts: Object.fromEntries(selectedGroups.map(group => ([
+      group.loadGroupKey,
+      Math.max(
+        0,
+        Math.min(
+          group.unassignedLoads,
+          state.draw.assignmentLoadCounts[group.loadGroupKey] ?? group.unassignedLoads,
+        ),
+      ),
+    ]))),
+  });
+}
+
+type Unsubscribe = () => void;
+
+let activeSessionGeneration = 0;
+let stopDataListenersRef: Unsubscribe | null = null;
+let stopCurrentAccessListenerRef: Unsubscribe | null = null;
+let stopAccessRecordsListenerRef: Unsubscribe | null = null;
+
+function stopDataListeners(): void {
+  stopDataListenersRef?.();
+  stopDataListenersRef = null;
+}
+
+function stopCurrentAccessListener(): void {
+  stopCurrentAccessListenerRef?.();
+  stopCurrentAccessListenerRef = null;
+}
+
+function stopAccessRecordsListener(): void {
+  stopAccessRecordsListenerRef?.();
+  stopAccessRecordsListenerRef = null;
+}
+
+function stopAllRealtimeListeners(): void {
+  stopAccessRecordsListener();
+  stopCurrentAccessListener();
+  stopDataListeners();
+}
+
+function beginSessionGeneration(): number {
+  activeSessionGeneration += 1;
+  stopAllRealtimeListeners();
+  return activeSessionGeneration;
+}
+
+function isActiveSessionGeneration(generation: number): boolean {
+  return generation === activeSessionGeneration;
+}
+
+function handleRealtimeSyncError(scope: string, generation: number, error: Error): void {
+  if (!isActiveSessionGeneration(generation)) {
+    return;
+  }
+
+  warn('Realtime manure sync failed for %s. Error=%O', scope, error);
+  snackbarMessage(`Error syncing ${scope}: ${error.message}`);
+}
+
+function applyFieldsSnapshot(nextFields: Field[]): void {
+  const draftDirty = isFieldDraftDirty();
+  const nextServerFields = cloneFields(nextFields);
+
+  state.serverFields = nextServerFields;
+
+  if (draftDirty) {
+    const differsFromServer = !stableEquals(state.fields, nextServerFields);
+    state.fieldsStale = differsFromServer && !state.fieldsKeepLocal;
+    if (!differsFromServer) {
+      state.fieldsKeepLocal = false;
+    }
+    return;
+  }
+
+  fields(nextServerFields);
+  state.pendingBoundaryFieldNames = [];
+  state.fieldsStale = false;
+  state.fieldsKeepLocal = false;
+}
+
+function applySourcesSnapshot(nextSources: Source[]): void {
+  const canonicalBefore = cloneSources(state.sources);
+  const draftDirty = state.lookupManagement.sourceModalOpen && isSourceDraftDirty(canonicalBefore);
+  const nextCanonical = cloneSources(nextSources);
+  const serverChanged = !stableEquals(canonicalBefore, nextCanonical);
+
+  sources(nextCanonical);
+
+  if (!state.lookupManagement.sourceModalOpen) {
+    lookupManagementState({
+      sourcesStale: false,
+      sourceKeepLocal: false,
+    });
+    return;
+  }
+
+  if (!draftDirty) {
+    lookupManagementState({
+      sources: cloneSources(nextCanonical),
+      sourcesStale: false,
+      sourceKeepLocal: false,
+    });
+    return;
+  }
+
+  const differsFromServer = !stableEquals(state.lookupManagement.sources, nextCanonical) || !isBlankSourceDraft();
+  if (!serverChanged || !differsFromServer) {
+    lookupManagementState({
+      sourcesStale: false,
+      sourceKeepLocal: false,
+    });
+    return;
+  }
+  lookupManagementState({ sourcesStale: !state.lookupManagement.sourceKeepLocal });
+}
+
+function applyDriversSnapshot(nextDrivers: Driver[]): void {
+  const canonicalBefore = cloneDrivers(state.drivers);
+  const draftDirty = state.lookupManagement.driverModalOpen && isDriverDraftDirty(canonicalBefore);
+  const nextCanonical = cloneDrivers(nextDrivers);
+  const serverChanged = !stableEquals(canonicalBefore, nextCanonical);
+
+  drivers(nextCanonical);
+
+  if (!state.lookupManagement.driverModalOpen) {
+    lookupManagementState({
+      driversStale: false,
+      driverKeepLocal: false,
+    });
+    return;
+  }
+
+  if (!draftDirty) {
+    lookupManagementState({
+      drivers: cloneDrivers(nextCanonical),
+      driversStale: false,
+      driverKeepLocal: false,
+    });
+    return;
+  }
+
+  const differsFromServer = !stableEquals(state.lookupManagement.drivers, nextCanonical) || !isBlankDriverDraft();
+  if (!serverChanged || !differsFromServer) {
+    lookupManagementState({
+      driversStale: false,
+      driverKeepLocal: false,
+    });
+    return;
+  }
+  lookupManagementState({ driversStale: !state.lookupManagement.driverKeepLocal });
+}
+
+function applyAccessRecordsSnapshot(nextRecords: AccessRecord[]): void {
+  const canonicalBefore = cloneAccessRecords(state.accessManagement.serverRecords);
+  const draftDirty = state.accessManagement.modalOpen && isAccessDraftDirty(canonicalBefore);
+  const nextCanonical = sortManagedAccessRecords(cloneAccessRecords(nextRecords));
+  const serverChanged = !stableEquals(canonicalBefore, nextCanonical);
+
+  state.accessManagement.serverRecords = nextCanonical;
+
+  if (!state.accessManagement.modalOpen) {
+    accessManagementState({
+      stale: false,
+      keepLocal: false,
+    });
+    return;
+  }
+
+  if (!draftDirty) {
+    accessManagementState({
+      records: cloneAccessRecords(nextCanonical),
+      stale: false,
+      keepLocal: false,
+    });
+    return;
+  }
+
+  const differsFromServer = !stableEquals(state.accessManagement.records, nextCanonical) || !isBlankAccessDraft();
+  if (!serverChanged || !differsFromServer) {
+    accessManagementState({
+      stale: false,
+      keepLocal: false,
+    });
+    return;
+  }
+  accessManagementState({ stale: !state.accessManagement.keepLocal });
+}
+
+function startCurrentAccessListener(
+  email: string,
+  displayName: string,
+  generation: number,
+): void {
+  stopCurrentAccessListener();
+  stopCurrentAccessListenerRef = observeAccessRecord(
+    email,
+    (record) => {
+      if (!isActiveSessionGeneration(generation)) {
+        return;
+      }
+
+      if (!isAccessEnabled(record)) {
+        info('Realtime access listener revoked manure access for email=%s', email);
+        stopAllRealtimeListeners();
+        closeAdminManagementSessions();
+        applyAccessDeniedUser({ email, displayName });
+        snackbarMessage('Your manure access changed. Reloaded the latest server access state.');
+        return;
+      }
+
+      const lostAdmin = state.auth.admin && !record.admin;
+      authState({
+        status: 'signed_in',
+        email,
+        displayName: record.displayName || displayName || email,
+        admin: record.admin,
+        error: '',
+      });
+      if (lostAdmin) {
+        closeAdminManagementSessions();
+      }
+    },
+    (error) => handleRealtimeSyncError('your access', generation, error),
+  );
+}
+
+function startAccessRecordsListener(generation: number): void {
+  stopAccessRecordsListener();
+  accessManagementState({ loading: true });
+  stopAccessRecordsListenerRef = observeAccessRecords(
+    (records) => {
+      if (!isActiveSessionGeneration(generation)) {
+        return;
+      }
+
+      applyAccessRecordsSnapshot(records);
+      accessManagementState({ loading: false });
+    },
+    (error) => {
+      if (!isActiveSessionGeneration(generation)) {
+        return;
+      }
+
+      accessManagementState({ loading: false });
+      handleRealtimeSyncError('access records', generation, error);
+    },
+  );
+}
+
+function startDataListeners(generation: number): void {
+  stopDataListeners();
+
+  const year = state.thisYear;
+  const unsubs = [
+    observeFields(
+      year,
+      (nextFields) => {
+        if (!isActiveSessionGeneration(generation)) {
+          return;
+        }
+        applyFieldsSnapshot(nextFields);
+      },
+      (error) => handleRealtimeSyncError('fields', generation, error),
+    ),
+    observeSources(
+      year,
+      (nextSources) => {
+        if (!isActiveSessionGeneration(generation)) {
+          return;
+        }
+        applySourcesSnapshot(nextSources);
+      },
+      (error) => handleRealtimeSyncError('sources', generation, error),
+    ),
+    observeDrivers(
+      year,
+      (nextDrivers) => {
+        if (!isActiveSessionGeneration(generation)) {
+          return;
+        }
+        applyDriversSnapshot(nextDrivers);
+      },
+      (error) => handleRealtimeSyncError('drivers', generation, error),
+    ),
+    observeLoads(
+      year,
+      (nextLoads) => {
+        if (!isActiveSessionGeneration(generation)) {
+          return;
+        }
+        loads(nextLoads);
+      },
+      (error) => handleRealtimeSyncError('current loads', generation, error),
+    ),
+    observeLoads(
+      year - 1,
+      (nextLoads) => {
+        if (!isActiveSessionGeneration(generation)) {
+          return;
+        }
+        previousLoads(nextLoads);
+      },
+      (error) => handleRealtimeSyncError('previous loads', generation, error),
+    ),
+    observeSpreadRegions(
+      year,
+      (nextRegions) => {
+        if (!isActiveSessionGeneration(generation)) {
+          return;
+        }
+        regions(nextRegions);
+      },
+      (error) => handleRealtimeSyncError('spread regions', generation, error),
+    ),
+  ];
+
+  stopDataListenersRef = () => {
+    for (const unsubscribe of unsubs) {
+      unsubscribe();
+    }
+  };
 }
 
 function validateManagedSources(sourcesList: Source[]): string | null {
@@ -304,6 +876,7 @@ async function logSessionLoadTokenSummary(context: string, user: ReturnType<type
 }
 
 async function loadSessionForUser(user: ReturnType<typeof getCurrentUser>): Promise<void> {
+  const generation = beginSessionGeneration();
   if (!user?.email) {
     info('No authenticated Firebase user is available; applying signed-out state');
     applySignedOutUser();
@@ -329,6 +902,9 @@ async function loadSessionForUser(user: ReturnType<typeof getCurrentUser>): Prom
 
   try {
     const accessRecord = await getAccessRecord(user.email);
+    if (!isActiveSessionGeneration(generation)) {
+      return;
+    }
     if (!isAccessEnabled(accessRecord)) {
       info('Manure access was denied or disabled for email=%s', user.email);
       applyAccessDeniedUser({
@@ -344,8 +920,12 @@ async function loadSessionForUser(user: ReturnType<typeof getCurrentUser>): Prom
         displayName: user.displayName || '',
       },
       accessRecord,
+      generation,
     );
   } catch (error) {
+    if (!isActiveSessionGeneration(generation)) {
+      return;
+    }
     warn('Manure session load failed for email=%s. Error=%O', user.email, error);
     const message = `Error loading manure access: ${(error as Error).message}`;
     resetSessionData();
@@ -359,6 +939,54 @@ async function loadSessionForUser(user: ReturnType<typeof getCurrentUser>): Prom
     loadingError(message);
     loading(false);
   }
+}
+
+async function ensureMigrationReady(
+  isAdmin: boolean,
+  generation: number,
+): Promise<boolean> {
+  const status = await getManureMigrationStatus(MANURE_APP_VERSION);
+  if (!isActiveSessionGeneration(generation)) {
+    return false;
+  }
+
+  const pendingVersions = status.pendingMigrations.map(migration => migration.version);
+  if (pendingVersions.length < 1) {
+    migrationState({
+      modalOpen: false,
+      required: false,
+      running: false,
+      currentVersion: status.currentVersion,
+      targetVersion: status.targetVersion,
+      pendingVersions: [],
+      logs: [],
+      error: '',
+    });
+    return true;
+  }
+
+  const fromVersion = status.currentVersion || 'legacy';
+  const toVersion = status.targetVersion || pendingVersions[pendingVersions.length - 1] || MANURE_APP_VERSION;
+  migrationState({
+    modalOpen: isAdmin,
+    required: true,
+    running: false,
+    currentVersion: status.currentVersion,
+    targetVersion: toVersion,
+    pendingVersions,
+    logs: isAdmin
+      ? [
+          'Database upgrade required before loading manure data.',
+          `Current model version: ${fromVersion}.`,
+          `Pending migration${pendingVersions.length === 1 ? '' : 's'}: ${pendingVersions.join(', ')}.`,
+        ]
+      : [],
+    error: isAdmin
+      ? ''
+      : `An admin must run the manure database migration (${fromVersion} → ${toVersion}) before this app can load.`,
+  });
+  loading(false);
+  return false;
 }
 
 export const authState = action('authState', (auth: Partial<State['auth']>) => {
@@ -387,6 +1015,45 @@ export const clearHistoryLoadGroupSelection = action('clearHistoryLoadGroupSelec
   });
 });
 
+export const toggleHistoryLoadGroupExpansion = action('toggleHistoryLoadGroupExpansion', (loadGroupKey: string) => {
+  const expanded = new Set(state.historyManagement.expandedLoadGroupKeys);
+  if (expanded.has(loadGroupKey)) {
+    expanded.delete(loadGroupKey);
+  } else {
+    expanded.add(loadGroupKey);
+  }
+
+  historyManagementState({
+    expandedLoadGroupKeys: [ ...expanded ],
+  });
+});
+
+export const setHistoryFilters = action(
+  'setHistoryFilters',
+  (filters: Partial<State['historyManagement']['filters']>) => {
+    historyManagementState({
+      filters: {
+        ...state.historyManagement.filters,
+        ...filters,
+      },
+      selectedLoadGroupKeys: [],
+      expandedLoadGroupKeys: [],
+    });
+  },
+);
+
+export const clearHistoryFilters = action('clearHistoryFilters', () => {
+  historyManagementState({
+    filters: {
+      drivers: [],
+      fields: [],
+      sources: [],
+    },
+    selectedLoadGroupKeys: [],
+    expandedLoadGroupKeys: [],
+  });
+});
+
 export const deleteHistoryLoadGroups = action('deleteHistoryLoadGroups', async (requestedLoadGroupKeys?: string[]) => {
   if (!state.auth.admin) {
     snackbarMessage('Only admins can delete load history.');
@@ -399,7 +1066,7 @@ export const deleteHistoryLoadGroups = action('deleteHistoryLoadGroups', async (
     return;
   }
 
-  const groupsByKey = summarizeLoadGroupsByKey(state.loads, state.regionAssignments, state.thisYear);
+  const groupsByKey = summarizeLoadGroupsByKey(state.loads, state.regions, state.thisYear);
   const groups = loadGroupKeys
     .map(loadGroupKey => groupsByKey.get(loadGroupKey))
     .filter((group): group is NonNullable<typeof group> => !!group);
@@ -411,52 +1078,46 @@ export const deleteHistoryLoadGroups = action('deleteHistoryLoadGroups', async (
 
   const totalLoads = groups.reduce((sum, group) => sum + group.totalLoads, 0);
   const confirmMessage = groups.length === 1
-    ? `Delete ${totalLoads} loads from ${groups[0]!.date} ${groups[0]!.field} / ${groups[0]!.source}? This also removes linked spread-region assignments and any region left with no assigned loads.`
-    : `Delete ${totalLoads} loads across ${groups.length} grouped history rows? This also removes linked spread-region assignments and any region left with no assigned loads.`;
+    ? `Delete ${totalLoads} loads from ${groups[0]!.date} ${groups[0]!.field} / ${groups[0]!.source}? This also removes those loads from linked spread regions and deletes any region left with no loads.`
+    : `Delete ${totalLoads} loads across ${groups.length} grouped history rows? This also removes those loads from linked spread regions and deletes any region left with no loads.`;
 
   if (!window.confirm(confirmMessage)) {
     return;
   }
 
   const selectedSet = new Set(groups.map(group => group.loadGroupKey));
-  const loadRecordIdsToDelete = groups.flatMap(group => group.records.map(record => record.id || createLoadRecordId(record)));
-  const assignmentsToDelete = state.regionAssignments.filter(assignment => selectedSet.has(assignment.loadGroupKey));
-  const assignmentIdsToDelete = assignmentsToDelete.map(
-    assignment => assignment.id || `${assignment.regionId}__${assignment.loadGroupKey}`,
-  );
-  const nextAssignments = state.regionAssignments.filter(assignment => !selectedSet.has(assignment.loadGroupKey));
-  const affectedRegionIds = new Set(assignmentsToDelete.map(assignment => assignment.regionId));
-  const remainingRegionIds = new Set(nextAssignments.map(assignment => assignment.regionId));
-  const regionIdsToDelete = [ ...affectedRegionIds ].filter(regionId => !remainingRegionIds.has(regionId));
-  const nextRegions = state.regions.filter(region => !region.id || !regionIdsToDelete.includes(region.id));
-  const nextLoads = state.loads.filter(loadRecord => !selectedSet.has(createLoadGroupKey(loadRecord)));
-  const currentLoadId = state.load.id || (
-    state.load.date && state.load.field && state.load.source && state.load.driver
-      ? createLoadRecordId(state.load)
-      : ''
-  );
+  const loadRecordIdsToDelete = groups.flatMap(group => group.loadRows.map(row => row.id));
+  const loadRecordIdSet = new Set(loadRecordIdsToDelete);
+  const updatedRegions: SpreadRegion[] = [];
+  const regionIdsToDelete: string[] = [];
+  for (const region of state.regions) {
+    const remainingLoadIds = (region.loadIds || []).filter(loadId => !loadRecordIdSet.has(loadId));
+    if (remainingLoadIds.length === (region.loadIds || []).length) {
+      continue;
+    }
+    if (remainingLoadIds.length < 1) {
+      if (region.id) {
+        regionIdsToDelete.push(region.id);
+      }
+      continue;
+    }
+    updatedRegions.push({
+      ...region,
+      loadIds: remainingLoadIds,
+    });
+  }
 
   historyManagementState({ deleting: true });
   try {
-    if (assignmentIdsToDelete.length > 0) {
-      await removeSpreadRegionAssignments(state.thisYear, assignmentIdsToDelete);
-    }
-    if (regionIdsToDelete.length > 0) {
-      await removeSpreadRegions(state.thisYear, regionIdsToDelete);
-    }
-    if (loadRecordIdsToDelete.length > 0) {
-      await removeLoadRecords(state.thisYear, loadRecordIdsToDelete);
-    }
-
-    regionAssignments(nextAssignments);
-    regions(nextRegions);
-    loads(nextLoads);
+    await deleteLoadHistoryBundle(state.thisYear, {
+      loadRecordIds: loadRecordIdsToDelete,
+      updatedRegions,
+      regionIds: regionIdsToDelete,
+    });
     historyManagementState({
       selectedLoadGroupKeys: state.historyManagement.selectedLoadGroupKeys.filter(key => !selectedSet.has(key)),
+      expandedLoadGroupKeys: state.historyManagement.expandedLoadGroupKeys.filter(key => !selectedSet.has(key)),
     });
-    if (currentLoadId && loadRecordIdsToDelete.includes(currentLoadId)) {
-      load({});
-    }
     snackbarMessage(groups.length === 1 ? 'Grouped load deleted' : 'Grouped loads deleted');
   } catch (error) {
     warn('Error deleting grouped manure load history. Error=%O', error);
@@ -477,7 +1138,7 @@ export const openDrawModalForLoadGroups = action(
     preferredMode?: SpreadRegion['mode'],
     preferredLoadCounts?: Record<string, number>,
   ) => {
-    const groupsByKey = summarizeLoadGroupsByKey(state.loads, state.regionAssignments, state.thisYear);
+    const groupsByKey = summarizeLoadGroupsByKey(state.loads, state.regions, state.thisYear);
     const selectedGroups = loadGroupKeys
       .map(loadGroupKey => groupsByKey.get(loadGroupKey))
       .filter((group): group is NonNullable<typeof group> => !!group);
@@ -499,9 +1160,8 @@ export const openDrawModalForLoadGroups = action(
       Math.max(
         0,
         Math.min(
-          group.totalLoads,
-          preferredLoadCounts?.[group.loadGroupKey]
-            ?? (group.unassignedLoads > 0 ? group.unassignedLoads : group.totalLoads),
+          group.unassignedLoads,
+          preferredLoadCounts?.[group.loadGroupKey] ?? group.unassignedLoads,
         ),
       ),
     ]));
@@ -519,6 +1179,14 @@ export const openDrawModalForLoadGroups = action(
     });
   },
 );
+
+type LoadGroupSelectionDraft = {
+  loadGroupKey: string;
+  date: string;
+  field: string;
+  source: string;
+  loadCount: number;
+};
 
 export const openDrawModalForCurrentLoad = action('openDrawModalForCurrentLoad', () => {
   if (!state.load.date || !state.load.field || !state.load.source) {
@@ -604,7 +1272,7 @@ export const setDrawAssignmentLoadCount = action(
 
 export const saveDrawRegion = action('saveDrawRegion', async (
   regionDraft: Omit<SpreadRegion, 'createdAt' | 'updatedAt' | 'updatedBy'>,
-  assignmentDrafts: Array<Omit<SpreadRegionAssignment, 'id' | 'regionId' | 'createdAt' | 'updatedAt' | 'updatedBy'>>,
+  assignmentDrafts: LoadGroupSelectionDraft[],
 ) => {
   if (!regionDraft.field) {
     snackbarMessage('Choose a field before saving a drawn region.');
@@ -617,33 +1285,31 @@ export const saveDrawRegion = action('saveDrawRegion', async (
 
   drawState({ saving: true });
   try {
-    const regionId = regionDraft.id || makeClientId('region');
-    const regionToSave: SpreadRegion = {
-      ...regionDraft,
-      id: regionId,
-    };
-    const nextRegions = state.regions.filter(region => region.id !== regionId);
-    const savedRegions = await persistSpreadRegions(
+    const groupsByKey = summarizeLoadGroupsByKey(state.loads, state.regions, state.thisYear);
+    const selectedLoadIds = assignmentDrafts.flatMap((assignmentDraft) => {
+      const group = groupsByKey.get(assignmentDraft.loadGroupKey);
+      if (!group) {
+        return [];
+      }
+      return group.unassignedLoadIds.slice(0, assignmentDraft.loadCount);
+    });
+    if (selectedLoadIds.length < 1) {
+      snackbarMessage('No unassigned loads were available to attach to the region.');
+      return;
+    }
+
+    await saveSpreadRegionWithLoadIds(
       state.thisYear,
-      [ ...nextRegions, regionToSave ],
+      {
+        ...regionDraft,
+        id: regionDraft.id || makeClientId('region'),
+      },
+      selectedLoadIds,
       currentActorEmail(),
     );
-
-    const assignmentsToSave: SpreadRegionAssignment[] = assignmentDrafts.map(assignment => ({
-      ...assignment,
-      regionId,
-    }));
-    const nextAssignments = state.regionAssignments.filter(assignment => assignment.regionId !== regionId);
-    const savedAssignments = await persistSpreadRegionAssignments(
-      state.thisYear,
-      [ ...nextAssignments, ...assignmentsToSave ],
-      currentActorEmail(),
-    );
-
-    regions(savedRegions);
-    regionAssignments(savedAssignments);
     historyManagementState({
       selectedLoadGroupKeys: [],
+      expandedLoadGroupKeys: [],
       deleting: false,
     });
     closeDrawModal();
@@ -693,6 +1359,257 @@ export const historyManagementState = action('historyManagementState', (historyM
     ...state.historyManagement,
     ...historyManagement,
   };
+});
+
+export const migrationState = action('migrationState', (migration: Partial<State['migration']>) => {
+  state.migration = {
+    ...state.migration,
+    ...migration,
+  };
+});
+export const downloadManureMigrationBackup = action('downloadManureMigrationBackup', async () => {
+  if (!state.auth.admin) {
+    snackbarMessage('Only admins can download manure database backups.');
+    return;
+  }
+  if (state.migration.backingUp || state.migration.running || state.migration.restoring) {
+    snackbarMessage('Wait for the current migration task to finish first.');
+    return;
+  }
+
+  migrationState({
+    backingUp: true,
+    error: '',
+    restoreError: '',
+  });
+  appendMigrationLog('Starting manure database backup.');
+
+  try {
+    const payload = await createManureBackupPayload({
+      appVersion: MANURE_APP_VERSION,
+      adminEmail: currentActorEmail(),
+      targetVersion: MANURE_APP_VERSION,
+      log: appendMigrationLog,
+    });
+    const fileName = backupFileName(payload.manifest);
+    const blob = await createBackupZipBlob(payload);
+    downloadBlob(blob, fileName);
+    migrationState({
+      backingUp: false,
+      backupDownloaded: true,
+      backupFileName: fileName,
+    });
+    appendMigrationLog(`Downloaded backup file ${fileName}.`);
+    snackbarMessage('Manure database backup downloaded.');
+  } catch (error) {
+    const message = `Error downloading manure backup: ${(error as Error).message}`;
+    warn(message, error);
+    migrationState({
+      backingUp: false,
+      error: message,
+    });
+    appendMigrationLog(message);
+    snackbarMessage(message);
+  }
+});
+
+export const openRestoreBackupModal = action('openRestoreBackupModal', () => {
+  if (!state.auth.admin) {
+    snackbarMessage('Only admins can restore manure database backups.');
+    return;
+  }
+
+  migrationState({
+    restoreModalOpen: true,
+    restoreFileName: '',
+    restoreSummary: null,
+    restoreError: '',
+  });
+});
+
+export const closeRestoreBackupModal = action('closeRestoreBackupModal', () => {
+  if (state.migration.restoring) {
+    return;
+  }
+
+  migrationState({
+    restoreModalOpen: false,
+    restoreFileName: '',
+    restoreSummary: null,
+    restoreError: '',
+  });
+});
+
+export const restoreManureBackupFile = action('restoreManureBackupFile', async (file: File) => {
+  if (!state.auth.admin) {
+    snackbarMessage('Only admins can restore manure database backups.');
+    return;
+  }
+  if (state.migration.running || state.migration.backingUp || state.migration.restoring) {
+    snackbarMessage('Wait for the current migration task to finish first.');
+    return;
+  }
+
+  migrationState({
+    restoreFileName: file.name,
+    restoreSummary: null,
+    restoreError: '',
+    error: '',
+  });
+
+  try {
+    const payload = await readBackupPayloadFromZip(file);
+    const summary = restoreSummaryFromManifest(payload.manifest);
+    migrationState({
+      restoreSummary: summary,
+    });
+
+    const currentProjectId = getBrowserFirebase().config.projectId;
+    let allowProjectMismatch = false;
+    if (summary?.projectId !== currentProjectId) {
+      allowProjectMismatch = window.confirm(
+        `This backup is from Firebase project ${summary?.projectId}, but the current app is using ${currentProjectId}. Restore anyway?`,
+      );
+      if (!allowProjectMismatch) {
+        appendMigrationLog('Restore cancelled because the backup project did not match the current Firebase project.');
+        return;
+      }
+    }
+
+    const confirmed = window.confirm(
+      `Restore manure backup ${file.name} from ${summary?.createdAt || 'an unknown time'}? This will replace manure model metadata and manure year data for ${summary?.yearIds.length || 0} year${summary?.yearIds.length === 1 ? '' : 's'}.`,
+    );
+    if (!confirmed) {
+      appendMigrationLog('Restore cancelled before writing backup data.');
+      return;
+    }
+
+    const generation = beginSessionGeneration();
+    migrationState({
+      restoring: true,
+      restoreError: '',
+    });
+    appendMigrationLog(`Starting restore from backup file ${file.name}.`);
+    const result = await restoreManureBackupPayload(payload, {
+      allowProjectMismatch,
+      log: appendMigrationLog,
+    });
+    if (!isActiveSessionGeneration(generation)) {
+      return;
+    }
+
+    migrationState({
+      restoring: false,
+      restoreModalOpen: false,
+      backupDownloaded: false,
+      backupFileName: '',
+    });
+    appendMigrationLog(`Restore finished from ${file.name}.`);
+    snackbarMessage(`Manure backup restored (${result.restoredDocuments} documents).`);
+
+    const migrationReady = await ensureMigrationReady(state.auth.admin, generation);
+    if (!migrationReady || !isActiveSessionGeneration(generation)) {
+      return;
+    }
+    const loaded = await loadAllData(generation);
+    if (!loaded || !isActiveSessionGeneration(generation)) {
+      return;
+    }
+    startCurrentAccessListener(state.auth.email, state.auth.displayName || state.auth.email, generation);
+    startDataListeners(generation);
+  } catch (error) {
+    const message = `Error restoring manure backup: ${(error as Error).message}`;
+    warn(message, error);
+    migrationState({
+      restoring: false,
+      restoreError: message,
+      error: message,
+    });
+    appendMigrationLog(message);
+    snackbarMessage(message);
+  }
+});
+
+export const runPendingMigrationUpgrade = action('runPendingMigrationUpgrade', async () => {
+  if (!state.auth.admin) {
+    snackbarMessage('Only admins can run manure database migrations.');
+    return;
+  }
+  if (!state.migration.required) {
+    snackbarMessage('No manure database migration is currently required.');
+    return;
+  }
+  if (state.migration.backingUp || state.migration.restoring) {
+    snackbarMessage('Wait for the current backup or restore task to finish first.');
+    return;
+  }
+  if (!state.migration.backupDownloaded) {
+    const proceed = window.confirm(
+      'No manure database backup has been downloaded in this session. Run the migration anyway?',
+    );
+    if (!proceed) {
+      return;
+    }
+  }
+
+  runInAction(() => {
+    state.migration.running = true;
+    state.migration.error = '';
+    state.migration.logs = [];
+  });
+
+  const appendLog = (message: string) => {
+    runInAction(() => {
+      state.migration.logs = [ ...state.migration.logs, message ];
+    });
+  };
+
+  try {
+    const result = await runPendingManureMigrations({
+      targetVersion: MANURE_APP_VERSION,
+      log: appendLog,
+    });
+    if (!isActiveSessionGeneration(activeSessionGeneration)) {
+      return;
+    }
+
+    runInAction(() => {
+      state.migration.currentVersion = result.currentVersion;
+      state.migration.targetVersion = result.targetVersion;
+      state.migration.pendingVersions = result.pendingMigrations.map(migration => migration.version);
+      state.migration.required = result.pendingMigrations.length > 0;
+      state.migration.running = false;
+      state.migration.error = '';
+      state.migration.modalOpen = result.pendingMigrations.length > 0;
+    });
+
+    if (result.pendingMigrations.length > 0) {
+      appendLog('Additional manure migrations are still pending.');
+      return;
+    }
+
+    const loaded = await loadAllData(activeSessionGeneration);
+    if (!loaded || !isActiveSessionGeneration(activeSessionGeneration)) {
+      return;
+    }
+    startCurrentAccessListener(state.auth.email, state.auth.displayName || state.auth.email, activeSessionGeneration);
+    startDataListeners(activeSessionGeneration);
+    runInAction(() => {
+      state.migration.modalOpen = false;
+      state.migration.required = false;
+      state.migration.pendingVersions = [];
+    });
+    snackbarMessage('Manure database migration complete.');
+  } catch (error) {
+    const message = `Error running manure database migration: ${(error as Error).message}`;
+    warn(message, error);
+    runInAction(() => {
+      state.migration.running = false;
+      state.migration.error = message;
+      state.migration.logs = [ ...state.migration.logs, message ];
+    });
+    snackbarMessage(message);
+  }
 });
 
 export const drawState = action('drawState', (draw: Partial<State['draw']>) => {
@@ -778,20 +1695,58 @@ export const online = action('online', (isOnline: boolean) => {
 
 export const resetSessionData = action('resetSessionData', () => {
   fields([]);
+  state.serverFields = [];
+  state.fieldsStale = false;
+  state.fieldsKeepLocal = false;
   sources([]);
   drivers([]);
   loads([]);
   previousLoads([]);
   regions([]);
-  regionAssignments([]);
+  state.mode = 'loads';
+  state.editingField = '';
   state.pendingBoundaryFieldNames = [];
   state.load = nextBlankLoad();
+  state.migration = {
+    modalOpen: false,
+    required: false,
+    running: false,
+    backingUp: false,
+    backupDownloaded: false,
+    backupFileName: '',
+    restoreModalOpen: false,
+    restoring: false,
+    restoreFileName: '',
+    restoreSummary: null,
+    restoreError: '',
+    currentVersion: null,
+    targetVersion: null,
+    pendingVersions: [],
+    logs: [],
+    error: '',
+  };
   refreshStoredLoadRecord();
   fieldsChanged(false);
+  accessManagementState({
+    modalOpen: false,
+    loading: false,
+    saving: false,
+    serverRecords: [],
+    records: [],
+    draft: nextBlankAccessDraft(),
+    stale: false,
+    keepLocal: false,
+  });
   historyManagementState({
     modalOpen: false,
     selectedLoadGroupKeys: [],
+    expandedLoadGroupKeys: [],
     deleting: false,
+    filters: {
+      drivers: [],
+      fields: [],
+      sources: [],
+    },
   });
   drawState({
     enabled: false,
@@ -810,6 +1765,19 @@ export const resetSessionData = action('resetSessionData', () => {
     title: '',
     message: '',
   });
+  lookupManagementState({
+    sourceModalOpen: false,
+    driverModalOpen: false,
+    saving: false,
+    sources: [],
+    drivers: [],
+    sourceDraft: nextBlankSourceDraft(),
+    driverDraft: nextBlankDriverDraft(),
+    sourcesStale: false,
+    driversStale: false,
+    sourceKeepLocal: false,
+    driverKeepLocal: false,
+  });
 });
 
 export const startSignIn = action('startSignIn', async () => {
@@ -822,7 +1790,11 @@ export const startSignIn = action('startSignIn', async () => {
   });
 
   try {
-    await signInWithGoogle();
+    const user = await signInWithGoogle();
+    if (state.loading || state.auth.status === 'checking') {
+      info('Google sign-in popup returned before manure auth observer completed; loading session directly');
+      await loadSessionForUser(user);
+    }
   } catch (error) {
     warn('Manure Google sign-in failed. Error=%O', error);
     loading(false);
@@ -852,6 +1824,7 @@ export const applySignedInUser = action('applySignedInUser', async (
     displayName: string;
   },
   accessRecord: AccessRecord,
+  generation = activeSessionGeneration,
 ) => {
   info('Applying signed-in manure user email=%s admin=%s', user.email, accessRecord.admin);
   authState({
@@ -861,12 +1834,22 @@ export const applySignedInUser = action('applySignedInUser', async (
     admin: accessRecord.admin,
     error: '',
   });
+  const migrationReady = await ensureMigrationReady(accessRecord.admin, generation);
+  if (!migrationReady || !isActiveSessionGeneration(generation)) {
+    return;
+  }
+  const loaded = await loadAllData(generation);
+  if (!loaded || !isActiveSessionGeneration(generation)) {
+    return;
+  }
 
-  await loadAllData();
+  startCurrentAccessListener(user.email, user.displayName || user.email, generation);
+  startDataListeners(generation);
 });
 
 export const applySignedOutUser = action('applySignedOutUser', () => {
   info('Applying signed-out manure session state');
+  stopAllRealtimeListeners();
   resetSessionData();
   authState({
     status: 'signed_out',
@@ -885,6 +1868,7 @@ export const applyAccessDeniedUser = action('applyAccessDeniedUser', (
   },
 ) => {
   info('Applying manure access-denied state for email=%s', user.email);
+  stopAllRealtimeListeners();
   resetSessionData();
   authState({
     status: 'access_denied',
@@ -896,33 +1880,36 @@ export const applyAccessDeniedUser = action('applyAccessDeniedUser', (
   loading(false);
 });
 
-export const loadAllData = action('loadAllData', async () => {
+export const loadAllData = action('loadAllData', async (generation = activeSessionGeneration): Promise<boolean> => {
   info('Loading all manure app data for year=%d', state.thisYear);
   loading(true);
   loadingError('');
 
   try {
     const data = await loadManureAppData(state.thisYear);
+    if (!isActiveSessionGeneration(generation)) {
+      return false;
+    }
     assertFields(data.fields);
     assertSources(data.sources);
     assertDrivers(data.drivers);
     assertLoadsRecords(data.loads);
     assertLoadsRecords(data.previousLoads);
     assertSpreadRegions(data.regions);
-    assertSpreadRegionAssignments(data.regionAssignments);
-
-    fields(data.fields);
-    sources(data.sources);
-    drivers(data.drivers);
+    state.serverFields = cloneFields(data.fields);
+    state.fieldsStale = false;
+    state.fieldsKeepLocal = false;
+    fields(cloneFields(data.fields));
+    sources(cloneSources(data.sources));
+    drivers(cloneDrivers(data.drivers));
     loads(data.loads);
     previousLoads(data.previousLoads);
     regions(data.regions);
-    regionAssignments(data.regionAssignments);
     state.pendingBoundaryFieldNames = [];
     fieldsChanged(false);
     load({});
     info(
-      'Loaded manure app data for year=%d fields=%d sources=%d drivers=%d loads=%d previousLoads=%d regions=%d assignments=%d',
+      'Loaded manure app data for year=%d fields=%d sources=%d drivers=%d loads=%d previousLoads=%d regions=%d',
       state.thisYear,
       data.fields.length,
       data.sources.length,
@@ -930,13 +1917,16 @@ export const loadAllData = action('loadAllData', async () => {
       data.loads.length,
       data.previousLoads.length,
       data.regions.length,
-      data.regionAssignments.length,
     );
+    return true;
   } catch (error) {
     warn('Error loading manure app data for year=%d. Error=%O', state.thisYear, error);
     loadingError(`Error loading manure data: ${(error as Error).message}`);
+    return false;
   } finally {
-    loading(false);
+    if (isActiveSessionGeneration(generation)) {
+      loading(false);
+    }
   }
 });
 
@@ -974,7 +1964,11 @@ export const saveFields = action('saveFields', async () => {
   loading(true);
   try {
     const savedFields = await persistFields(state.thisYear, state.fields, currentActorEmail());
-    fields(savedFields);
+    const nextSavedFields = cloneFields(savedFields);
+    state.serverFields = nextSavedFields;
+    state.fieldsStale = false;
+    state.fieldsKeepLocal = false;
+    fields(nextSavedFields);
     state.pendingBoundaryFieldNames = [];
     fieldsChanged(false);
     snackbarMessage('Fields saved');
@@ -1195,24 +2189,54 @@ export const saveLoad = action('saveLoad', async (loadToSave?: LoadsRecord | nul
   }
 
   try {
-    const savedLoad = await saveLoadRecord(state.thisYear, currentLoad, currentActorEmail());
-    loads(mergeOrAppendLoad(savedLoad));
-    load(savedLoad);
-    return savedLoad;
+    const latestPoint = currentLoad.geojson.features[currentLoad.geojson.features.length - 1];
+    const loadId = await appendToLoadRecord(
+      state.thisYear,
+      currentLoad,
+      1,
+      latestPoint ? [ latestPoint ] : [],
+      currentActorEmail(),
+    );
+    return {
+      ...currentLoad,
+      id: loadId,
+    };
   } catch (error) {
     loadingError(`Error saving load: ${(error as Error).message}`);
+    load({
+      date: currentLoad.date,
+      field: currentLoad.field,
+      source: currentLoad.source,
+      driver: currentLoad.driver,
+    });
   }
 });
 
 
 export const closeAccessManagementModal = action('closeAccessManagementModal', () => {
+  stopAccessRecordsListener();
   accessManagementState({
     modalOpen: false,
     loading: false,
     saving: false,
+    stale: false,
+    keepLocal: false,
     records: [],
     draft: nextBlankAccessDraft(),
   });
+});
+
+export const keepLocalFieldEdits = action('keepLocalFieldEdits', () => {
+  state.fieldsStale = false;
+  state.fieldsKeepLocal = true;
+});
+
+export const reloadFieldsFromServer = action('reloadFieldsFromServer', () => {
+  fields(cloneFields(state.serverFields));
+  state.pendingBoundaryFieldNames = [];
+  state.fieldsChanged = false;
+  state.fieldsStale = false;
+  state.fieldsKeepLocal = false;
 });
 
 export const snackbarMessage = action('snackbarMessage', (message: string) => {
@@ -1304,31 +2328,21 @@ export const load = action('load', (record: Partial<LoadsRecord>) => {
   delete state.load.updatedAt;
   delete state.load.updatedBy;
 
-  const knownLoad = state.loads.find(loadRecord =>
+  const matchingLoads = state.loads.filter(loadRecord =>
     loadRecord.date === state.load.date
     && loadRecord.source === state.load.source
     && loadRecord.field === state.load.field
     && loadRecord.driver === state.load.driver,
   );
 
-  if (knownLoad) {
-    state.load.id = knownLoad.id;
-    state.load.createdAt = knownLoad.createdAt;
-    state.load.updatedAt = knownLoad.updatedAt;
-    state.load.updatedBy = knownLoad.updatedBy;
-    if (!('loads' in record)) {
-      state.load.loads = knownLoad.loads;
-    }
-    if (!('geojson' in record)) {
-      state.load.geojson = knownLoad.geojson;
-    }
-  } else {
-    if (!('loads' in record)) {
-      state.load.loads = 0;
-    }
-    if (!('geojson' in record)) {
-      state.load.geojson = { type: 'FeatureCollection', features: [] };
-    }
+  if (!('loads' in record)) {
+    state.load.loads = matchingLoads.reduce((sum, loadRecord) => sum + loadRecord.loads, 0);
+  }
+  if (!('geojson' in record)) {
+    state.load.geojson = {
+      type: 'FeatureCollection',
+      features: matchingLoads.flatMap(loadRecord => loadRecord.geojson.features),
+    };
   }
 
   refreshStoredLoadRecord();
@@ -1414,6 +2428,14 @@ export const loads = action('loads', (nextLoads: LoadsRecord[]) => {
     features: allFeatures,
   };
   geojsonLoads(geojson);
+  load({
+    date: state.load.date,
+    field: state.load.field,
+    source: state.load.source,
+    driver: state.load.driver,
+  });
+  revalidateHistorySelections();
+  revalidateDrawTargets();
 });
 
 export const previousLoads = action('previousLoads', (nextPreviousLoads: LoadsRecord[]) => {
@@ -1446,10 +2468,8 @@ export const regions = action('regions', (nextRegions: SpreadRegion[]) => {
       },
     })),
   });
-});
-
-export const regionAssignments = action('regionAssignments', (nextAssignments: SpreadRegionAssignment[]) => {
-  state.regionAssignments = nextAssignments;
+  revalidateHistorySelections();
+  revalidateDrawTargets();
 });
 
 export const geojsonRegions = action(
@@ -1487,25 +2507,21 @@ export const retrySessionLoad = action('retrySessionLoad', async (userOverride?:
   }
 });
 
-export const loadAccessManagementRecords = action('loadAccessManagementRecords', async () => {
+export const loadAccessManagementRecords = action('loadAccessManagementRecords', () => {
   if (!state.auth.admin) {
     snackbarMessage('Only admins can manage manure access.');
     return;
   }
-
-  accessManagementState({ loading: true });
-  try {
-    const records = await listAccessRecords();
-    accessManagementState({ records });
-  } catch (error) {
-    warn('Error loading manure access management records. Error=%O', error);
-    snackbarMessage(`Error loading access records: ${(error as Error).message}`);
-  } finally {
-    accessManagementState({ loading: false });
+  if (state.accessManagement.serverRecords.length > 0) {
+    accessManagementState({
+      records: cloneAccessRecords(state.accessManagement.serverRecords),
+      loading: false,
+    });
   }
+  startAccessRecordsListener(activeSessionGeneration);
 });
 
-export const openAccessManagementModal = action('openAccessManagementModal', async () => {
+export const openAccessManagementModal = action('openAccessManagementModal', () => {
   if (!state.auth.admin) {
     snackbarMessage('Only admins can manage manure access.');
     return;
@@ -1513,16 +2529,19 @@ export const openAccessManagementModal = action('openAccessManagementModal', asy
 
   accessManagementState({
     modalOpen: true,
-    records: [],
+    records: cloneAccessRecords(state.accessManagement.serverRecords),
     draft: nextBlankAccessDraft(),
+    stale: false,
+    keepLocal: false,
   });
-  await loadAccessManagementRecords();
+  loadAccessManagementRecords();
 });
 
 export const openHistoryModal = action('openHistoryModal', () => {
   historyManagementState({
     modalOpen: true,
     selectedLoadGroupKeys: [],
+    expandedLoadGroupKeys: [],
     deleting: false,
   });
 });
@@ -1531,6 +2550,7 @@ export const closeHistoryModal = action('closeHistoryModal', () => {
   historyManagementState({
     modalOpen: false,
     selectedLoadGroupKeys: [],
+    expandedLoadGroupKeys: [],
     deleting: false,
   });
 });
@@ -1549,6 +2569,8 @@ export const openSourceManagementModal = action('openSourceManagementModal', () 
     drivers: [],
     sourceDraft: nextBlankSourceDraft(),
     driverDraft: nextBlankDriverDraft(),
+    sourcesStale: false,
+    sourceKeepLocal: false,
   });
 });
 
@@ -1561,6 +2583,10 @@ export const closeSourceManagementModal = action('closeSourceManagementModal', (
     drivers: [],
     sourceDraft: nextBlankSourceDraft(),
     driverDraft: nextBlankDriverDraft(),
+    sourcesStale: false,
+    sourceKeepLocal: false,
+    driversStale: false,
+    driverKeepLocal: false,
   });
 });
 
@@ -1578,6 +2604,8 @@ export const openDriverManagementModal = action('openDriverManagementModal', () 
     drivers: cloneDrivers(state.drivers),
     sourceDraft: nextBlankSourceDraft(),
     driverDraft: nextBlankDriverDraft(),
+    driversStale: false,
+    driverKeepLocal: false,
   });
 });
 
@@ -1590,6 +2618,8 @@ export const closeDriverManagementModal = action('closeDriverManagementModal', (
     drivers: [],
     sourceDraft: nextBlankSourceDraft(),
     driverDraft: nextBlankDriverDraft(),
+    driversStale: false,
+    driverKeepLocal: false,
   });
 });
 
@@ -1625,6 +2655,22 @@ export const deleteManagedSource = action('deleteManagedSource', (key: string) =
   state.lookupManagement.sources = state.lookupManagement.sources.filter(source => sourceRecordKey(source) !== key);
 });
 
+export const keepLocalManagedSources = action('keepLocalManagedSources', () => {
+  lookupManagementState({
+    sourcesStale: false,
+    sourceKeepLocal: true,
+  });
+});
+
+export const reloadManagedSourcesFromServer = action('reloadManagedSourcesFromServer', () => {
+  lookupManagementState({
+    sources: cloneSources(state.sources),
+    sourceDraft: nextBlankSourceDraft(),
+    sourcesStale: false,
+    sourceKeepLocal: false,
+  });
+});
+
 export const saveManagedSources = action('saveManagedSources', async () => {
   if (!state.auth.admin) {
     snackbarMessage('Only admins can manage sources.');
@@ -1640,10 +2686,13 @@ export const saveManagedSources = action('saveManagedSources', async () => {
   lookupManagementState({ saving: true });
   try {
     const savedSources = await persistSources(state.thisYear, state.lookupManagement.sources, currentActorEmail());
-    sources(savedSources);
+    const nextSavedSources = cloneSources(savedSources);
+    sources(nextSavedSources);
     lookupManagementState({
-      sources: cloneSources(savedSources),
+      sources: cloneSources(nextSavedSources),
       sourceDraft: nextBlankSourceDraft(),
+      sourcesStale: false,
+      sourceKeepLocal: false,
     });
     snackbarMessage('Sources saved');
   } catch (error) {
@@ -1679,6 +2728,22 @@ export const deleteManagedDriver = action('deleteManagedDriver', (key: string) =
   state.lookupManagement.drivers = state.lookupManagement.drivers.filter(driver => driverRecordKey(driver) !== key);
 });
 
+export const keepLocalManagedDrivers = action('keepLocalManagedDrivers', () => {
+  lookupManagementState({
+    driversStale: false,
+    driverKeepLocal: true,
+  });
+});
+
+export const reloadManagedDriversFromServer = action('reloadManagedDriversFromServer', () => {
+  lookupManagementState({
+    drivers: cloneDrivers(state.drivers),
+    driverDraft: nextBlankDriverDraft(),
+    driversStale: false,
+    driverKeepLocal: false,
+  });
+});
+
 export const saveManagedDrivers = action('saveManagedDrivers', async () => {
   if (!state.auth.admin) {
     snackbarMessage('Only admins can manage drivers.');
@@ -1694,10 +2759,13 @@ export const saveManagedDrivers = action('saveManagedDrivers', async () => {
   lookupManagementState({ saving: true });
   try {
     const savedDrivers = await persistDrivers(state.thisYear, state.lookupManagement.drivers, currentActorEmail());
-    drivers(savedDrivers);
+    const nextSavedDrivers = cloneDrivers(savedDrivers);
+    drivers(nextSavedDrivers);
     lookupManagementState({
-      drivers: cloneDrivers(savedDrivers),
+      drivers: cloneDrivers(nextSavedDrivers),
       driverDraft: nextBlankDriverDraft(),
+      driversStale: false,
+      driverKeepLocal: false,
     });
     snackbarMessage('Drivers saved');
   } catch (error) {
@@ -1742,6 +2810,22 @@ export const createManagedAccessRecord = action('createManagedAccessRecord', asy
   } finally {
     accessManagementState({ saving: false });
   }
+});
+
+export const keepLocalManagedAccess = action('keepLocalManagedAccess', () => {
+  accessManagementState({
+    stale: false,
+    keepLocal: true,
+  });
+});
+
+export const reloadManagedAccessFromServer = action('reloadManagedAccessFromServer', () => {
+  accessManagementState({
+    records: cloneAccessRecords(state.accessManagement.serverRecords),
+    draft: nextBlankAccessDraft(),
+    stale: false,
+    keepLocal: false,
+  });
 });
 
 export const saveManagedAccessRecord = action('saveManagedAccessRecord', async (email: string) => {

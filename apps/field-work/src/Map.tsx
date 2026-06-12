@@ -3,9 +3,7 @@ import { observer } from 'mobx-react-lite';
 import { Circle, CircleMarker, GeoJSON, MapContainer, TileLayer, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import 'leaflet-draw';
-import 'leaflet-draw/dist/leaflet.draw.css';
-import type { Feature, FeatureCollection, GeoJsonObject, MultiPolygon, Polygon } from 'geojson';
+import type { Feature, FeatureCollection, MultiPolygon, Polygon } from 'geojson';
 import { context } from './state';
 import './Map.css';
 
@@ -21,35 +19,6 @@ function fieldCollection(fields: Array<{ name: string; boundary: Feature<Polygon
         ...field.boundary,
         properties: { name: field.name },
       })),
-  };
-}
-
-function boundaryFromFeatureGroup(featureGroup: L.FeatureGroup): Feature<Polygon | MultiPolygon> | null {
-  const polygons: Feature<Polygon>[] = [];
-
-  featureGroup.eachLayer((layer) => {
-    if (layer instanceof L.Polygon) {
-      const feature = layer.toGeoJSON() as Feature<Polygon>;
-      if (feature.geometry.type === 'Polygon') {
-        polygons.push(feature);
-      }
-    }
-  });
-
-  if (polygons.length < 1) {
-    return null;
-  }
-  if (polygons.length === 1) {
-    return polygons[0];
-  }
-
-  return {
-    type: 'Feature',
-    properties: polygons[0]?.properties || {},
-    geometry: {
-      type: 'MultiPolygon',
-      coordinates: polygons.map(polygon => polygon.geometry.coordinates),
-    },
   };
 }
 
@@ -190,118 +159,6 @@ const CurrentLocationLayer = observer(() => {
   );
 });
 
-const FieldManagerDrawControl = observer(() => {
-  const map = useMap();
-  const { state, actions } = React.useContext(context);
-  const featureGroupRef = React.useRef<L.FeatureGroup | null>(null);
-  const controlRef = React.useRef<L.Control.Draw | null>(null);
-  const selectedField = state.fieldDrafts.find(field => field.name === state.selectedManagerFieldName) || null;
-  const selectedBoundary = selectedField?.boundary || null;
-
-  useEffect(() => {
-    const featureGroup = new L.FeatureGroup();
-    featureGroupRef.current = featureGroup;
-    map.addLayer(featureGroup);
-
-    return () => {
-      map.removeLayer(featureGroup);
-      featureGroupRef.current = null;
-    };
-  }, [map]);
-
-  useEffect(() => {
-    const featureGroup = featureGroupRef.current;
-    if (!featureGroup) {
-      return;
-    }
-    featureGroup.clearLayers();
-    if (!selectedBoundary) {
-      return;
-    }
-    const geoJsonLayer = L.geoJSON(selectedBoundary as unknown as GeoJsonObject);
-    geoJsonLayer.eachLayer(layer => featureGroup.addLayer(layer));
-  }, [selectedBoundary]);
-
-  useEffect(() => {
-    if (controlRef.current) {
-      map.removeControl(controlRef.current);
-      controlRef.current = null;
-    }
-
-    const featureGroup = featureGroupRef.current;
-    if (!featureGroup || !selectedField) {
-      return;
-    }
-
-    const drawControl = new L.Control.Draw({
-      position: 'topright',
-      edit: {
-        featureGroup,
-        edit: selectedBoundary ? {} : false,
-        remove: !!selectedBoundary,
-      },
-      draw: {
-        polygon: !selectedBoundary
-          ? {
-              allowIntersection: false,
-              showArea: true,
-            }
-          : false,
-        polyline: false,
-        rectangle: false,
-        circle: false,
-        marker: false,
-        circlemarker: false,
-      },
-    });
-    controlRef.current = drawControl;
-    map.addControl(drawControl);
-
-    return () => {
-      if (controlRef.current) {
-        map.removeControl(controlRef.current);
-        controlRef.current = null;
-      }
-    };
-  }, [map, selectedBoundary, selectedField]);
-
-  useEffect(() => {
-    const handleCreated: L.LeafletEventHandlerFn = (event) => {
-      const createdEvent = event as L.DrawEvents.Created;
-      if (!selectedField || !featureGroupRef.current) {
-        return;
-      }
-      featureGroupRef.current.clearLayers();
-      featureGroupRef.current.addLayer(createdEvent.layer);
-      actions.fieldDraftBoundary(selectedField.name, boundaryFromFeatureGroup(featureGroupRef.current));
-    };
-    const handleEdited: L.LeafletEventHandlerFn = () => {
-      if (!selectedField || !featureGroupRef.current) {
-        return;
-      }
-      actions.fieldDraftBoundary(selectedField.name, boundaryFromFeatureGroup(featureGroupRef.current));
-    };
-    const handleDeleted: L.LeafletEventHandlerFn = () => {
-      if (!selectedField) {
-        return;
-      }
-      actions.fieldDraftBoundary(selectedField.name, null);
-    };
-
-    map.on(L.Draw.Event.CREATED, handleCreated);
-    map.on(L.Draw.Event.EDITED, handleEdited);
-    map.on(L.Draw.Event.DELETED, handleDeleted);
-
-    return () => {
-      map.off(L.Draw.Event.CREATED, handleCreated);
-      map.off(L.Draw.Event.EDITED, handleEdited);
-      map.off(L.Draw.Event.DELETED, handleDeleted);
-    };
-  }, [actions, map, selectedField]);
-
-  return null;
-});
-
 export const Map = observer(() => {
   const { state, actions } = React.useContext(context);
   const operation = state.board?.operations.find(candidate => candidate.name === state.selectedOperationName) || null;
@@ -431,7 +288,6 @@ export const Map = observer(() => {
               layer.on('click', () => handleFeatureClick(feature as FieldFeature));
             }}
           />
-          <FieldManagerDrawControl />
         </>
       )}
 

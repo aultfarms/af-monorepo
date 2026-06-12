@@ -2,6 +2,7 @@ import React from 'react';
 import { observer } from 'mobx-react-lite';
 import { context } from './state';
 import {
+  Alert,
   Box,
   Button,
   Dialog,
@@ -33,6 +34,8 @@ export const FieldsForm = observer(() => {
   const [editMode, setEditMode] = React.useState(false);
   const [fieldPendingDelete, setFieldPendingDelete] = React.useState<string | null>(null);
   const open = state.mode === 'fields';
+  const fieldsStale = state.fieldsStale;
+  const keepLocalFields = state.fieldsKeepLocal;
   const pendingBoundaryFieldNames = React.useMemo(
     () => new Set(state.pendingBoundaryFieldNames),
     [state.pendingBoundaryFieldNames],
@@ -109,11 +112,41 @@ export const FieldsForm = observer(() => {
           </Stack>
 
           <Box sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 1.5, flex: '1 0 auto', bgcolor: '#f5f5f5' }}>
+            {fieldsStale && (
+              <Alert
+                severity="warning"
+                action={(
+                  <Stack direction="row" spacing={1}>
+                    <Button color="inherit" size="small" onClick={actions.keepLocalFieldEdits}>
+                      Keep my edits
+                    </Button>
+                    <Button color="inherit" size="small" onClick={actions.reloadFieldsFromServer}>
+                      Reload from server
+                    </Button>
+                  </Stack>
+                )}
+              >
+                Field data changed in another browser. Choose whether to keep these local edits for a later save or reload the latest server fields.
+              </Alert>
+            )}
+            {!fieldsStale && keepLocalFields && (
+              <Alert
+                severity="info"
+                action={(
+                  <Button color="inherit" size="small" onClick={actions.reloadFieldsFromServer}>
+                    Reload from server
+                  </Button>
+                )}
+              >
+                Keeping local field edits. Saving will overwrite newer field data from the server.
+              </Alert>
+            )}
             <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ xs: 'stretch', sm: 'center' }}>
               <Button
                 onClick={() => setEditMode(!editMode)}
                 variant="outlined"
                 color="primary"
+                disabled={fieldsStale}
               >
                 {editMode ? 'Disable Edit' : 'Enable Edit'}
               </Button>
@@ -125,6 +158,7 @@ export const FieldsForm = observer(() => {
                     setEditMode(true);
                     actions.addField();
                   }}
+                  disabled={fieldsStale}
                 >
                   Add Field
                 </Button>
@@ -134,6 +168,7 @@ export const FieldsForm = observer(() => {
                   variant="contained"
                   color="secondary"
                   onClick={() => void actions.saveFields()}
+                  disabled={fieldsStale}
                 >
                   Save Fields
                 </Button>
@@ -149,6 +184,8 @@ export const FieldsForm = observer(() => {
                 p: 1.5,
                 textAlign: 'center',
                 bgcolor: isDragActive ? 'action.hover' : 'background.paper',
+                opacity: fieldsStale ? 0.6 : 1,
+                pointerEvents: fieldsStale ? 'none' : 'auto',
               }}
             >
               <input {...getInputProps()} />
@@ -189,6 +226,7 @@ export const FieldsForm = observer(() => {
                                 style={{ width: '100%' }}
                                 value={field.name}
                                 onChange={(e) => editMode && actions.fieldName(field.name, e.target.value)}
+                                disabled={fieldsStale}
                               />
                               {pendingBoundaryFieldNames.has(field.name) && (
                                 <Typography variant="caption" color="warning.main">
@@ -206,6 +244,7 @@ export const FieldsForm = observer(() => {
                               style={{ width: '100%' }}
                               value={field.responsibleParty}
                               onChange={(event) => actions.fieldResponsibleParty(field.name, event.target.value)}
+                              disabled={fieldsStale}
                             />
                           )}
                       </TableCell>
@@ -226,6 +265,7 @@ export const FieldsForm = observer(() => {
                                 actions.fieldAcreage(field.name, Number.parseFloat(value));
                               }}
                               inputProps={{ step: 0.01, min: 0 }}
+                              disabled={fieldsStale}
                             />
                           )}
                       </TableCell>
@@ -245,10 +285,11 @@ export const FieldsForm = observer(() => {
                                     value === '' ? undefined : Number.parseFloat(value),
                                   );
                                 }}
+                                disabled={fieldsStale}
                               />
                               <Tooltip title="Set heading from map">
                                 <span>
-                                  <IconButton onClick={() => actions.openDrawModalForFieldHeading(field.name)}>
+                                  <IconButton onClick={() => actions.openDrawModalForFieldHeading(field.name)} disabled={fieldsStale}>
                                     <TimelineIcon />
                                   </IconButton>
                                 </span>
@@ -261,7 +302,7 @@ export const FieldsForm = observer(() => {
                           {editMode && (
                             <Tooltip title={pendingBoundaryFieldNames.has(field.name) ? 'Draw boundary' : 'Edit boundary'}>
                               <span>
-                                <IconButton onClick={() => actions.openDrawModalForFieldBoundary(field.name)}>
+                                <IconButton onClick={() => actions.openDrawModalForFieldBoundary(field.name)} disabled={fieldsStale}>
                                   <CropFreeIcon />
                                 </IconButton>
                               </span>
@@ -277,7 +318,7 @@ export const FieldsForm = observer(() => {
                           {editMode && (
                             <Tooltip title="Delete field">
                               <span>
-                                <IconButton color="error" onClick={() => setFieldPendingDelete(field.name)}>
+                                <IconButton color="error" onClick={() => setFieldPendingDelete(field.name)} disabled={fieldsStale}>
                                   <DeleteOutlineIcon />
                                 </IconButton>
                               </span>

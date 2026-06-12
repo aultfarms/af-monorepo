@@ -1,6 +1,7 @@
 import React from 'react';
 import { observer } from 'mobx-react-lite';
 import {
+  Alert,
   Box,
   Button,
   IconButton,
@@ -18,7 +19,14 @@ import { context } from './state';
 
 export const DriverManagementModal = observer(() => {
   const { state, actions } = React.useContext(context);
-  const { driverModalOpen, saving, drivers, driverDraft } = state.lookupManagement;
+  const {
+    driverModalOpen,
+    saving,
+    drivers,
+    driverDraft,
+    driversStale,
+    driverKeepLocal,
+  } = state.lookupManagement;
 
   return (
     <Modal open={driverModalOpen} onClose={() => !saving && actions.closeDriverManagementModal()}>
@@ -46,10 +54,41 @@ export const DriverManagementModal = observer(() => {
             Close
           </Button>
         </Box>
+        {driversStale && (
+          <Alert
+            severity="warning"
+            sx={{ mb: 2 }}
+            action={(
+              <Box sx={{ display: 'flex', gap: 1 }}>
+                <Button color="inherit" size="small" onClick={actions.keepLocalManagedDrivers}>
+                  Keep my edits
+                </Button>
+                <Button color="inherit" size="small" onClick={actions.reloadManagedDriversFromServer}>
+                  Reload from server
+                </Button>
+              </Box>
+            )}
+          >
+            Driver data changed in another browser. Choose whether to keep this local draft for a later save or reload the latest server drivers.
+          </Alert>
+        )}
+        {!driversStale && driverKeepLocal && (
+          <Alert
+            severity="info"
+            sx={{ mb: 2 }}
+            action={(
+              <Button color="inherit" size="small" onClick={actions.reloadManagedDriversFromServer}>
+                Reload from server
+              </Button>
+            )}
+          >
+            Keeping local driver edits. Saving will overwrite newer driver data from the server.
+          </Alert>
+        )}
 
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2, mb: 2 }}>
           <Typography variant="subtitle1">Drivers</Typography>
-          <Button variant="contained" onClick={() => void actions.saveManagedDrivers()} disabled={saving}>
+          <Button variant="contained" onClick={() => void actions.saveManagedDrivers()} disabled={saving || driversStale}>
             Save Drivers
           </Button>
         </Box>
@@ -59,9 +98,9 @@ export const DriverManagementModal = observer(() => {
             label="Name"
             value={driverDraft.name}
             onChange={event => actions.driverManagementDraft({ name: event.target.value })}
-            disabled={saving}
+            disabled={saving || driversStale}
           />
-          <Button variant="outlined" onClick={actions.addManagedDriver} disabled={saving}>
+          <Button variant="outlined" onClick={actions.addManagedDriver} disabled={saving || driversStale}>
             Add
           </Button>
         </Box>
@@ -88,11 +127,11 @@ export const DriverManagementModal = observer(() => {
                           onChange={event => actions.updateManagedDriver(rowKey, { name: event.target.value })}
                           fullWidth
                           size="small"
-                          disabled={saving}
+                          disabled={saving || driversStale}
                         />
                       </TableCell>
                       <TableCell align="right">
-                        <IconButton onClick={() => actions.deleteManagedDriver(rowKey)} disabled={saving}>
+                        <IconButton onClick={() => actions.deleteManagedDriver(rowKey)} disabled={saving || driversStale}>
                           <DeleteOutlineIcon />
                         </IconButton>
                       </TableCell>

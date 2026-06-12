@@ -40,6 +40,8 @@ const fieldWorkLocalStorageKeys = [
   'af.field-work.operation',
   'af.field-work.operation-options',
 ] as const;
+const BOARD_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+type BoardRefreshReason = 'startup' | 'manual' | 'post_save' | 'auto';
 type FieldModalSubmitAction =
   | 'start'
   | 'complete'
@@ -101,6 +103,10 @@ function clearFieldWorkLocalCache(): void {
   }
 }
 
+function hasDirtyDrafts(): boolean {
+  return state.fieldDraftsDirty || state.cropDraftsDirty || state.optionDraftsDirty;
+}
+
 function stringValue(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -134,6 +140,17 @@ async function fetchTrelloJson<T>(path: string, token: string, params: Record<st
     return {} as T;
   }
   return JSON.parse(responseText) as T;
+}
+
+async function fetchBoardDateLastActivity(boardId: string): Promise<string> {
+  const token = readStoredTrelloToken();
+  if (!token) {
+    throw new Error('No Trello token is available');
+  }
+  const board = await fetchTrelloJson<Record<string, unknown>>(`/boards/${boardId}`, token, {
+    fields: 'name,dateLastActivity',
+  });
+  return stringValue(board.dateLastActivity);
 }
 
 function readStoredOperationOptionDefaults(): Record<string, CompletionValues> {
@@ -636,6 +653,13 @@ export const closeIssuesModal = action('closeIssuesModal', () => {
   state.issuesModalOpen = false;
 });
 
+export const boardRefreshState = action('boardRefreshState', (refresh: Partial<State['boardRefresh']>) => {
+  state.boardRefresh = {
+    ...state.boardRefresh,
+    ...refresh,
+  };
+});
+
 export const mode = action('mode', (nextMode: State['mode']) => {
   state.mode = nextMode;
   if (nextMode === 'field_manager' && !state.selectedManagerFieldName) {
@@ -787,6 +811,7 @@ export const applyBoard = action('applyBoard', (board: State['board']) => {
   replaceCropDrafts((board?.cropLists || []).map(editableCropFromList));
   state.fieldDraftsDirty = false;
   state.cropDraftsDirty = false;
+  state.optionDraftsDirty = false;
   if (state.selectedOperationName && !board?.operations.find(operation => operation.name === state.selectedOperationName)) {
     state.selectedOperationName = '';
     persistSelectedOperation();
@@ -800,18 +825,111 @@ export const loadBoard = action('loadBoard', async (force?: true) => {
 
   try {
     const board = await fieldWorkBoard({ client: await trello(), force });
+    const loadedAt = Date.now();
+    let boardActivityAt = state.boardRefresh.lastKnownBoardActivityAt;
+    try {
+      const fetchedBoardActivityAt = await fetchBoardDateLastActivity(board.boardId);
+      if (fetchedBoardActivityAt) {
+        boardActivityAt = fetchedBoardActivityAt;
+      }
+    } catch (error) {
+      info('Unable to read board activity while loading field-work board', error);
+    }
     runInAction(() => {
       applyBoard(board);
+      state.boardRefresh = {
+        ...state.boardRefresh,
+        lastLoadedAt: loadedAt,
+        lastCheckedAt: loadedAt,
+        lastAttemptAt: loadedAt,
+        lastKnownBoardActivityAt: boardActivityAt,
+        checkInFlight: false,
+        pendingRemoteChange: false,
+      };
     });
 
     if (board.errors.length > 0 || board.warnings.length > 0) {
       recordIssues(boardIssues(board));
       snackbarMessage(`Loaded with ${board.errors.length + board.warnings.length} field-work issue(s)`);
     }
+    return true;
   } catch (error) {
     loadingError(`Unable to load Field Work board: ${(error as Error).message}`);
+    return false;
   } finally {
     loading(false);
+  }
+});
+
+export const refreshBoard = action('refreshBoard', async (reason: BoardRefreshReason = 'manual') => {
+  if (state.boardRefresh.checkInFlight) {
+    return false;
+  }
+  if (reason === 'manual' && hasDirtyDrafts()) {
+    snackbarMessage(
+      state.boardRefresh.pendingRemoteChange
+        ? 'Trello has newer field-work data, but unsaved local edits are blocking refresh. Save first.'
+        : 'Save your local field-work edits before refreshing from Trello.',
+    );
+    return false;
+  }
+  return loadBoard(true);
+});
+
+export const maybeAutoRefreshBoard = action('maybeAutoRefreshBoard', async () => {
+  if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+    return false;
+  }
+  if (!state.trelloAuthorized || !state.board || state.loading || state.boardRefresh.checkInFlight) {
+    return false;
+  }
+
+  const now = Date.now();
+  const lastBoardActivityCheck = Math.max(state.boardRefresh.lastAttemptAt, state.boardRefresh.lastLoadedAt);
+  if (now - lastBoardActivityCheck < BOARD_REFRESH_INTERVAL_MS) {
+    return false;
+  }
+
+  const previousBoardActivityAt = state.boardRefresh.lastKnownBoardActivityAt;
+  boardRefreshState({
+    checkInFlight: true,
+    lastAttemptAt: now,
+  });
+
+  try {
+    const nextBoardActivityAt = await fetchBoardDateLastActivity(state.board.boardId);
+    boardRefreshState({
+      checkInFlight: false,
+      lastCheckedAt: Date.now(),
+    });
+
+    if (!nextBoardActivityAt) {
+      return false;
+    }
+    if (!previousBoardActivityAt) {
+      boardRefreshState({ lastKnownBoardActivityAt: nextBoardActivityAt });
+      return false;
+    }
+    if (nextBoardActivityAt === previousBoardActivityAt) {
+      return false;
+    }
+    if (hasDirtyDrafts()) {
+      const shouldNotify = !state.boardRefresh.pendingRemoteChange;
+      boardRefreshState({
+        lastKnownBoardActivityAt: nextBoardActivityAt,
+        pendingRemoteChange: true,
+      });
+      if (shouldNotify) {
+        snackbarMessage('Trello has newer field-work data. Save local edits before refreshing.');
+      }
+      return false;
+    }
+
+    return loadBoard(true);
+  } catch (error) {
+    boardRefreshState({ checkInFlight: false });
+    info('Unable to check field-work board freshness', error);
+    return false;
   }
 });
 
@@ -838,7 +956,7 @@ export const saveOptionDrafts = action('saveOptionDrafts', async () => {
     runInAction(() => {
       state.optionDraftsDirty = false;
     });
-    await loadBoard(true);
+    await refreshBoard('post_save');
     snackbarMessage('Options saved');
   } catch (error) {
     loadingError(`Unable to save options: ${(error as Error).message}`);
@@ -861,7 +979,7 @@ export const saveSelectedOperationCropFilter = action('saveSelectedOperationCrop
       operation,
       cropNames,
     });
-    await loadBoard(true);
+    await refreshBoard('post_save');
     snackbarMessage('Crop/template filter saved');
   } catch (error) {
     loadingError(`Unable to save crop/template filter: ${(error as Error).message}`);
@@ -891,7 +1009,7 @@ export const saveOperationDefinition = action('saveOperationDefinition', async (
       state.selectedOperationName = savedOperation.name;
       persistSelectedOperation();
     });
-    await loadBoard(true);
+    await refreshBoard('post_save');
     snackbarMessage(operation ? 'Operation updated' : 'Operation created');
     return true;
   } catch (error) {
@@ -918,7 +1036,7 @@ export const saveCropDrafts = action('saveCropDrafts', async () => {
     runInAction(() => {
       state.cropDraftsDirty = false;
     });
-    await loadBoard(true);
+    await refreshBoard('post_save');
     snackbarMessage('Crops saved');
   } catch (error) {
     loadingError(`Unable to save crops: ${(error as Error).message}`);
@@ -945,7 +1063,7 @@ export const loginWithTrello = action('loginWithTrello', async () => {
   try {
     await trello();
     setTrelloAuthorized(true);
-    await loadBoard(true);
+    await refreshBoard('startup');
     if (!state.board) {
       throw new Error(state.loadingError || `Unable to load ${fieldWorkTrelloConfig.board}`);
     }
@@ -1064,7 +1182,7 @@ export const submitFieldModal = action('submitFieldModal', async (nextAction: Fi
     }
 
     closeFieldModal();
-    await loadBoard(true);
+    await refreshBoard('post_save');
   } catch (error) {
     loadingError(`Unable to update operation: ${(error as Error).message}`);
   }
@@ -1150,12 +1268,12 @@ export const cropDraftName = action('cropDraftName', (currentName: string, nextN
     }
     return {
       ...cloneCrop(crop),
-      name: trimmedName,
+      name: nextName,
     };
   });
 
   replaceCropDrafts(nextDrafts);
-  state.selectedCropName = trimmedName;
+  state.selectedCropName = nextName;
   state.cropDraftsDirty = true;
 });
 
@@ -1245,11 +1363,11 @@ export const fieldDraftName = action('fieldDraftName', (currentName: string, nex
     }
     return {
       ...cloneField(field),
-      name: trimmedName,
+      name: nextName,
     };
   });
   replaceFieldDrafts(nextDrafts);
-  state.selectedManagerFieldName = trimmedName;
+  state.selectedManagerFieldName = nextName;
   state.fieldDraftsDirty = true;
 });
 
@@ -1269,6 +1387,42 @@ export const fieldDraftAliases = action('fieldDraftAliases', (fieldName: string,
   });
   replaceFieldDrafts(nextDrafts);
   state.fieldDraftsDirty = true;
+});
+
+export const openFieldBoundaryEditor = action('openFieldBoundaryEditor', (fieldName: string) => {
+  const field = state.fieldDrafts.find(candidate => candidate.name === fieldName) || null;
+  if (!field) {
+    snackbarMessage(`Field "${fieldName}" was not found`);
+    return;
+  }
+  if (field.boundary?.geometry.type === 'MultiPolygon') {
+    snackbarMessage(`Field "${fieldName}" has a multi-part boundary that cannot be edited in the polygon editor yet`);
+    return;
+  }
+
+  state.fieldBoundaryEditor = {
+    open: true,
+    fieldName,
+  };
+});
+
+export const closeFieldBoundaryEditor = action('closeFieldBoundaryEditor', () => {
+  state.fieldBoundaryEditor = {
+    open: false,
+    fieldName: '',
+  };
+});
+
+export const saveFieldBoundaryFromEditor = action('saveFieldBoundaryFromEditor', (boundary: FieldBoundary) => {
+  const fieldName = state.fieldBoundaryEditor.fieldName;
+  if (!fieldName) {
+    snackbarMessage('Select a field before saving a boundary');
+    return;
+  }
+
+  fieldDraftBoundary(fieldName, boundary);
+  closeFieldBoundaryEditor();
+  snackbarMessage('Field boundary updated');
 });
 
 export const fieldDraftAcreage = action('fieldDraftAcreage', (fieldName: string, acreage: number) => {
@@ -1308,7 +1462,7 @@ export const addFieldDraft = action('addFieldDraft', () => {
   const newField: EditableField = {
     name: nextNewFieldName(),
     aliases: [],
-    acreage: 1,
+    acreage: 0,
     boundary: null,
   };
   replaceFieldDrafts([ ...state.fieldDrafts.map(cloneField), newField ]);
@@ -1372,7 +1526,7 @@ export const saveFieldDrafts = action('saveFieldDrafts', async () => {
     runInAction(() => {
       state.fieldDraftsDirty = false;
     });
-    await loadBoard(true);
+    await refreshBoard('post_save');
     snackbarMessage('Fields saved');
   } catch (error) {
     loadingError(`Unable to save fields: ${(error as Error).message}`);

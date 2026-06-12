@@ -10,7 +10,6 @@ import {
   type LoadsRecord,
   type Source,
   type SpreadRegion,
-  type SpreadRegionAssignment,
 } from '@aultfarms/manure';
 import type { FirebaseCacheMode } from '@aultfarms/firebase';
 
@@ -54,6 +53,39 @@ export type ActivityOverlayState = {
   title: string;
   message: string;
 };
+export type HistoryFilters = {
+  drivers: string[];
+  fields: string[];
+  sources: string[];
+};
+export type MigrationState = {
+  modalOpen: boolean;
+  required: boolean;
+  running: boolean;
+  backingUp: boolean;
+  backupDownloaded: boolean;
+  backupFileName: string;
+  restoreModalOpen: boolean;
+  restoring: boolean;
+  restoreFileName: string;
+  restoreSummary: {
+    createdAt: string;
+    projectId: string;
+    appVersion: string;
+    adminEmail: string;
+    currentVersion: string | null;
+    targetVersion: string | null;
+    pendingVersions: string[];
+    yearIds: string[];
+    collectionCount: number;
+  } | null;
+  restoreError: string;
+  currentVersion: string | null;
+  targetVersion: string | null;
+  pendingVersions: string[];
+  logs: string[];
+  error: string;
+};
 
 export type State = {
   thisYear: number;
@@ -77,29 +109,37 @@ export type State = {
   mode: 'loads' | 'fields';
   editingField: string;
   fieldsChanged: boolean;
+  fieldsStale: boolean;
+  fieldsKeepLocal: boolean;
   pendingBoundaryFieldNames: string[];
   loads: LoadsRecord[];
   previousLoads: LoadsRecord[];
   fields: Field[];
+  serverFields: Field[];
   sources: Source[];
   drivers: Driver[];
   regions: SpreadRegion[];
-  regionAssignments: SpreadRegionAssignment[];
   geojsonFields: BigData;
   geojsonLoads: BigData;
   geojsonRegions: BigData;
   load: LoadsRecord;
+  migration: MigrationState;
   accessManagement: {
     modalOpen: boolean;
     loading: boolean;
     saving: boolean;
+    serverRecords: AccessRecord[];
     records: AccessRecord[];
     draft: AccessManagementDraft;
+    stale: boolean;
+    keepLocal: boolean;
   };
   historyManagement: {
     modalOpen: boolean;
     selectedLoadGroupKeys: string[];
+    expandedLoadGroupKeys: string[];
     deleting: boolean;
+    filters: HistoryFilters;
   };
   draw: DrawManagementState;
   activityOverlay: ActivityOverlayState;
@@ -111,6 +151,10 @@ export type State = {
     drivers: Driver[];
     sourceDraft: SourceManagementDraft;
     driverDraft: DriverManagementDraft;
+    sourcesStale: boolean;
+    driversStale: boolean;
+    sourceKeepLocal: boolean;
+    driverKeepLocal: boolean;
   };
   loadingError: string;
   loading: boolean;
@@ -197,6 +241,35 @@ function emptyActivityOverlayState(): ActivityOverlayState {
   };
 }
 
+function emptyHistoryFilters(): HistoryFilters {
+  return {
+    drivers: [],
+    fields: [],
+    sources: [],
+  };
+}
+
+function emptyMigrationState(): MigrationState {
+  return {
+    modalOpen: false,
+    required: false,
+    running: false,
+    backingUp: false,
+    backupDownloaded: false,
+    backupFileName: '',
+    restoreModalOpen: false,
+    restoring: false,
+    restoreFileName: '',
+    restoreSummary: null,
+    restoreError: '',
+    currentVersion: null,
+    targetVersion: null,
+    pendingVersions: [],
+    logs: [],
+    error: '',
+  };
+}
+
 const load = emptyLoadRecord();
 try {
   const localLoad = JSON.parse(localStorage.getItem('af.manure.loadRecord') || '{}') as Partial<LoadsRecord>;
@@ -247,29 +320,37 @@ export const state = observable<State>({
   mode: 'loads',
   editingField: '',
   fieldsChanged: false,
+  fieldsStale: false,
+  fieldsKeepLocal: false,
   pendingBoundaryFieldNames: [],
   loads: [],
   previousLoads: [],
   fields: [],
+  serverFields: [],
   sources: [],
   drivers: [],
   regions: [],
-  regionAssignments: [],
   geojsonFields: { rev: 0 },
   geojsonLoads: { rev: 0 },
   geojsonRegions: { rev: 0 },
   load,
+  migration: emptyMigrationState(),
   accessManagement: {
     modalOpen: false,
     loading: false,
     saving: false,
+    serverRecords: [],
     records: [],
     draft: emptyAccessManagementDraft(),
+    stale: false,
+    keepLocal: false,
   },
   historyManagement: {
     modalOpen: false,
     selectedLoadGroupKeys: [],
+    expandedLoadGroupKeys: [],
     deleting: false,
+    filters: emptyHistoryFilters(),
   },
   draw: emptyDrawManagementState(),
   activityOverlay: emptyActivityOverlayState(),
@@ -281,6 +362,10 @@ export const state = observable<State>({
     drivers: [],
     sourceDraft: emptySourceManagementDraft(),
     driverDraft: emptyDriverManagementDraft(),
+    sourcesStale: false,
+    driversStale: false,
+    sourceKeepLocal: false,
+    driverKeepLocal: false,
   },
   loadingError: '',
   loading: true,

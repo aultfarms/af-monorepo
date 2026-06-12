@@ -9,6 +9,7 @@ import { context } from './state';
 export const FieldManager = observer(() => {
   const { state, actions } = React.useContext(context);
   const selectedField = state.fieldDrafts.find(field => field.name === state.selectedManagerFieldName) || null;
+  const boundaryEditorDisabled = selectedField?.boundary?.geometry.type === 'MultiPolygon';
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     accept: { 'application/vnd.google-earth.kmz': ['.kmz'] },
@@ -65,7 +66,7 @@ export const FieldManager = observer(() => {
       </Stack>
 
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Select a field, then use the map draw/edit toolbar to create or edit its polygon boundary.
+        Select a field, then open the boundary editor to draw or adjust its polygon in a dedicated modal.
       </Typography>
       {state.fieldDrafts.length > 0 && (
         <Stack direction="row" spacing={1} sx={{ mb: 2, alignItems: 'flex-start' }}>
@@ -104,6 +105,18 @@ export const FieldManager = observer(() => {
           <Typography variant="body2" color="text.secondary">
             {`${selectedField.acreage.toFixed(2)} ac${selectedField.boundary ? '' : ' • no boundary yet'}`}
           </Typography>
+          <Button
+            variant="outlined"
+            onClick={() => actions.openFieldBoundaryEditor(selectedField.name)}
+            disabled={boundaryEditorDisabled}
+          >
+            {selectedField.boundary ? 'Edit boundary' : 'Draw boundary'}
+          </Button>
+          {boundaryEditorDisabled && (
+            <Typography variant="body2" color="warning.main">
+              Multi-part boundaries cannot be edited in the polygon editor yet.
+            </Typography>
+          )}
           <TextField
             label="Field name"
             value={selectedField.name}
@@ -126,8 +139,8 @@ export const FieldManager = observer(() => {
           />
           <Typography variant="body2" color="text.secondary">
             {selectedField.boundary
-              ? 'Use the edit toolbar on the map to drag, add, or delete polygon vertices.'
-              : 'Use the polygon draw tool on the map to create this field boundary.'}
+              ? 'Use the boundary editor to add, select, delete, or redraw polygon vertices.'
+              : 'Use the boundary editor to create this field boundary.'}
           </Typography>
         </Stack>
       )}

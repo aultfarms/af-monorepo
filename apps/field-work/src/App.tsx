@@ -3,6 +3,7 @@ import { observer } from 'mobx-react-lite';
 import { Box, Button, Snackbar, Typography } from '@mui/material';
 import { context } from './state';
 import { CropManager } from './CropManager';
+import { FieldBoundaryModal } from './FieldBoundaryModal';
 import { FieldManager } from './FieldManager';
 import { FieldModal } from './FieldModal';
 import { IssuesModal } from './IssuesModal';
@@ -175,6 +176,7 @@ export const App = observer(() => {
         </div>
         {state.loading && <LoadingIndicator />}
       </Box>
+      <FieldBoundaryModal />
       <FieldModal />
       <IssuesModal />
       <Snackbar

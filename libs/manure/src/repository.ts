@@ -1,5 +1,6 @@
 import debug from 'debug';
 import { getBrowserFirebase } from '@aultfarms/firebase';
+import type { Feature, Point } from 'geojson';
 import {
   collection,
   deleteDoc,
@@ -8,6 +9,7 @@ import {
   getDocFromCache,
   getDocs,
   getDocsFromCache,
+  onSnapshot,
   setDoc,
   writeBatch,
   type CollectionReference,
@@ -17,7 +19,6 @@ import {
   type QueryDocumentSnapshot,
 } from 'firebase/firestore';
 import {
-  createLoadGroupKey,
   nominalFieldAcreage,
   type AccessRecord,
   type Driver,
@@ -35,11 +36,17 @@ const warn = debug('af/manure-lib:warn');
 const MANURE_YEARS_COLLECTION = 'manureYears';
 const MANURE_ACCESS_COLLECTION = 'manureAccess';
 const METADATA_COLLECTIONS = [ 'fields', 'sources', 'drivers' ] as const;
+const LEGACY_LOADS_COLLECTION = 'loads';
+const LOAD_EVENTS_COLLECTION = 'loadEvents';
 const SPREAD_REGIONS_COLLECTION = 'regions';
 const SPREAD_REGION_ASSIGNMENTS_COLLECTION = 'regionAssignments';
 const DEFAULT_SOURCE_SPREAD_WIDTH_FEET = 40;
 const DEFAULT_SOURCE_LOAD_LENGTH_FEET = 500;
 const CURRENT_MANURE_SCHEMA_VERSION = 3;
+export type RealtimeSnapshotMetadata = {
+  fromCache: boolean;
+  hasPendingWrites: boolean;
+};
 
 type MetadataCollectionName = typeof METADATA_COLLECTIONS[number];
 type StoredFieldDocument = Omit<Field, 'id' | 'boundary'> & {
@@ -48,6 +55,7 @@ type StoredFieldDocument = Omit<Field, 'id' | 'boundary'> & {
 type StoredSpreadRegionDocument = Omit<SpreadRegion, 'id' | 'polygon' | 'centerline'> & {
   polygon: string | SpreadRegion['polygon'];
   centerline?: string | SpreadRegion['centerline'];
+  loadIds?: string[];
 };
 
 function firestore() {
@@ -120,6 +128,15 @@ function makeEntityId(prefix: string): string {
 function normalizeKeyPart(value: string): string {
   const normalized = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
   return normalized || 'blank';
+}
+
+function snapshotMetadataInfo(
+  snapshot: { metadata: { fromCache: boolean; hasPendingWrites: boolean } },
+): RealtimeSnapshotMetadata {
+  return {
+    fromCache: snapshot.metadata.fromCache,
+    hasPendingWrites: snapshot.metadata.hasPendingWrites,
+  };
 }
 
 function stripUndefined<T extends Record<string, unknown>>(value: T): T {
@@ -284,6 +301,13 @@ function metadataCollectionRef(year: number, name: MetadataCollectionName) {
 function spreadRegionsCollectionRef(year: number) {
   return subcollectionRef(year, SPREAD_REGIONS_COLLECTION);
 }
+function legacyLoadsCollectionRef(year: number) {
+  return subcollectionRef(year, LEGACY_LOADS_COLLECTION);
+}
+
+function loadEventsCollectionRef(year: number) {
+  return subcollectionRef(year, LOAD_EVENTS_COLLECTION);
+}
 
 function spreadRegionAssignmentsCollectionRef(year: number) {
   return subcollectionRef(year, SPREAD_REGION_ASSIGNMENTS_COLLECTION);
@@ -415,6 +439,65 @@ async function getDocsWithOfflineFallback(
   }
 }
 
+function observeMappedCollection<T>(
+  queryRef: Query<DocumentData>,
+  description: string,
+  mapper: (snapshot: QueryDocumentSnapshot<DocumentData>) => T,
+  sorter: (items: T[]) => T[],
+  listener: (items: T[], metadata: RealtimeSnapshotMetadata) => void,
+  onError?: (error: Error) => void,
+): () => void {
+  info('Subscribing to Firestore query target=%s', description);
+  return onSnapshot(
+    queryRef,
+    (snapshot) => {
+      const items = sorter(snapshot.docs.map(mapper));
+      info(
+        'Received Firestore snapshot target=%s count=%d fromCache=%s pendingWrites=%s',
+        description,
+        items.length,
+        snapshot.metadata.fromCache,
+        snapshot.metadata.hasPendingWrites,
+      );
+      listener(items, snapshotMetadataInfo(snapshot));
+    },
+    (error) => {
+      warn('Firestore realtime query failed target=%s error=%O', description, error);
+      onError?.(error as Error);
+    },
+  );
+}
+
+function observeMappedDocument<T>(
+  reference: DocumentReference<DocumentData>,
+  description: string,
+  mapper: (snapshot: QueryDocumentSnapshot<DocumentData>) => T,
+  listener: (value: T | null, metadata: RealtimeSnapshotMetadata) => void,
+  onError?: (error: Error) => void,
+): () => void {
+  info('Subscribing to Firestore document path=%s (%s)', reference.path, description);
+  return onSnapshot(
+    reference,
+    (snapshot) => {
+      const value = snapshot.exists()
+        ? mapper(snapshot as QueryDocumentSnapshot<DocumentData>)
+        : null;
+      info(
+        'Received Firestore document snapshot path=%s exists=%s fromCache=%s pendingWrites=%s',
+        reference.path,
+        snapshot.exists(),
+        snapshot.metadata.fromCache,
+        snapshot.metadata.hasPendingWrites,
+      );
+      listener(value, snapshotMetadataInfo(snapshot));
+    },
+    (error) => {
+      warn('Firestore realtime document failed path=%s error=%O', reference.path, error);
+      onError?.(error as Error);
+    },
+  );
+}
+
 function sortByName<T extends { name: string }>(items: T[]): T[] {
   return [ ...items ].sort((left, right) => left.name.localeCompare(right.name));
 }
@@ -427,7 +510,11 @@ function sortLoads(loads: LoadsRecord[]): LoadsRecord[] {
     if (byField !== 0) return byField;
     const bySource = left.source.localeCompare(right.source);
     if (bySource !== 0) return bySource;
-    return left.driver.localeCompare(right.driver);
+    const byDriver = left.driver.localeCompare(right.driver);
+    if (byDriver !== 0) return byDriver;
+    const byTimestamp = (left.timestamp || left.createdAt || '').localeCompare(right.timestamp || right.createdAt || '');
+    if (byTimestamp !== 0) return byTimestamp;
+    return (left.id || '').localeCompare(right.id || '');
   });
 }
 
@@ -460,9 +547,16 @@ function toDriver(snapshot: QueryDocumentSnapshot<DocumentData>): Driver {
 }
 
 function toLoad(snapshot: QueryDocumentSnapshot<DocumentData>): LoadsRecord {
+  const data = snapshot.data() as Omit<LoadsRecord, 'id'>;
   return {
     id: snapshot.id,
-    ...(snapshot.data() as Omit<LoadsRecord, 'id'>),
+    ...data,
+    timestamp: typeof data.timestamp === 'string'
+      ? data.timestamp
+      : (typeof data.createdAt === 'string' ? data.createdAt : ''),
+    loggedBy: typeof data.loggedBy === 'string'
+      ? data.loggedBy
+      : (typeof data.updatedBy === 'string' ? data.updatedBy : ''),
   };
 }
 
@@ -471,6 +565,9 @@ function toSpreadRegion(snapshot: QueryDocumentSnapshot<DocumentData>): SpreadRe
   return {
     id: snapshot.id,
     ...data,
+    loadIds: Array.isArray(data.loadIds)
+      ? data.loadIds.filter((loadId): loadId is string => typeof loadId === 'string')
+      : [],
     polygon: parsePolygonFeature(data.polygon, `${snapshot.ref.path}.polygon`),
     centerline: typeof data.centerline === 'undefined'
       ? undefined
@@ -682,13 +779,12 @@ async function loadCurrentYear(year: number): Promise<Omit<ManureAppData, 'previ
 
   const offlineYearMessage = `Unable to load manure data for ${year} while offline. Connect once online so it can be cached, then retry.`;
   const yearSnapshot = await getDocWithOfflineFallback(yearDocRef(year), offlineYearMessage);
-  const [ fieldSnapshot, sourceSnapshot, driverSnapshot, loadSnapshot, regionSnapshot, assignmentSnapshot ] = await Promise.all([
+  const [ fieldSnapshot, sourceSnapshot, driverSnapshot, loadSnapshot, regionSnapshot ] = await Promise.all([
     getDocsWithOfflineFallback(metadataCollectionRef(year, 'fields'), `${MANURE_YEARS_COLLECTION}/${year}/fields`, offlineYearMessage),
     getDocsWithOfflineFallback(metadataCollectionRef(year, 'sources'), `${MANURE_YEARS_COLLECTION}/${year}/sources`, offlineYearMessage),
     getDocsWithOfflineFallback(metadataCollectionRef(year, 'drivers'), `${MANURE_YEARS_COLLECTION}/${year}/drivers`, offlineYearMessage),
-    getDocsWithOfflineFallback(subcollectionRef(year, 'loads'), `${MANURE_YEARS_COLLECTION}/${year}/loads`, offlineYearMessage),
+    getDocsWithOfflineFallback(loadEventsCollectionRef(year), `${MANURE_YEARS_COLLECTION}/${year}/${LOAD_EVENTS_COLLECTION}`, offlineYearMessage),
     getDocsWithOfflineFallback(spreadRegionsCollectionRef(year), `${MANURE_YEARS_COLLECTION}/${year}/${SPREAD_REGIONS_COLLECTION}`, offlineYearMessage),
-    getDocsWithOfflineFallback(spreadRegionAssignmentsCollectionRef(year), `${MANURE_YEARS_COLLECTION}/${year}/${SPREAD_REGION_ASSIGNMENTS_COLLECTION}`, offlineYearMessage),
   ]);
 
   const currentYear: Omit<ManureAppData, 'previousLoads'> = {
@@ -698,7 +794,6 @@ async function loadCurrentYear(year: number): Promise<Omit<ManureAppData, 'previ
     drivers: sortByName(driverSnapshot.docs.map(toDriver)),
     loads: sortLoads(loadSnapshot.docs.map(toLoad)),
     regions: sortSpreadRegions(regionSnapshot.docs.map(toSpreadRegion)),
-    regionAssignments: sortSpreadRegionAssignments(assignmentSnapshot.docs.map(toSpreadRegionAssignment)),
   };
 
   const currentSchemaVersion = Number((yearSnapshot.data() as { schemaVersion?: unknown } | undefined)?.schemaVersion || 1);
@@ -707,14 +802,13 @@ async function loadCurrentYear(year: number): Promise<Omit<ManureAppData, 'previ
   }
 
   info(
-    'Loaded current manure data for year=%d fields=%d sources=%d drivers=%d loads=%d regions=%d assignments=%d',
+    'Loaded current manure data for year=%d fields=%d sources=%d drivers=%d loads=%d regions=%d',
     year,
     fieldSnapshot.size,
     sourceSnapshot.size,
     driverSnapshot.size,
     loadSnapshot.size,
     regionSnapshot.size,
-    assignmentSnapshot.size,
   );
 
   return currentYear;
@@ -726,8 +820,8 @@ export async function loadManureAppData(year: number): Promise<ManureAppData> {
 
   try {
     const previousSnapshot = await getDocsWithOfflineFallback(
-      subcollectionRef(year - 1, 'loads'),
-      `${MANURE_YEARS_COLLECTION}/${year - 1}/loads`,
+      loadEventsCollectionRef(year - 1),
+      `${MANURE_YEARS_COLLECTION}/${year - 1}/${LOAD_EVENTS_COLLECTION}`,
       `Unable to load previous manure loads for ${year - 1} while offline. Connect once online so they can be cached, then retry.`,
     );
     previousLoads = sortLoads(previousSnapshot.docs.map(toLoad));
@@ -933,6 +1027,7 @@ export async function saveSpreadRegions(
     batch.set(doc(spreadRegionsCollectionRef(year), region.id!), stripUndefined({
       field: region.field,
       mode: region.mode,
+      loadIds: region.loadIds || [],
       polygon: serializePolygonFeature(region.polygon),
       centerline: region.centerline ? serializeLineFeature(region.centerline) : undefined,
       headingDegrees: region.headingDegrees,
@@ -951,78 +1046,76 @@ export async function saveSpreadRegions(
   return sortSpreadRegions(normalizedRegions);
 }
 
-export async function saveSpreadRegionAssignments(
+export async function saveSpreadRegionWithLoadIds(
   year: number,
-  assignments: SpreadRegionAssignment[],
+  region: SpreadRegion,
+  loadIds: string[],
   actorEmail: string,
-): Promise<SpreadRegionAssignment[]> {
+): Promise<SpreadRegion> {
   await ensureYearDocument(year);
 
-  const normalizedAssignments = assignments.map((assignment) => {
-    const timestamp = nowIso();
-    const loadGroupKey = createLoadGroupKey(assignment);
-    return {
-      ...assignment,
-      id: assignment.id || createSpreadRegionAssignmentId({
-        regionId: assignment.regionId,
-        loadGroupKey,
-      }),
-      loadGroupKey,
-      createdAt: assignment.createdAt || timestamp,
-      updatedAt: timestamp,
-      updatedBy: actorEmail,
-    };
-  });
-
-  const currentSnapshot = await getDocsWithOfflineFallback(
-    spreadRegionAssignmentsCollectionRef(year),
-    `${MANURE_YEARS_COLLECTION}/${year}/${SPREAD_REGION_ASSIGNMENTS_COLLECTION}`,
-    `Unable to update spread region assignments for ${year} while offline before the current assignment list has been cached. Connect once online, then retry.`,
+  const timestamp = nowIso();
+  const normalizedRegion: SpreadRegion = {
+    ...region,
+    id: region.id || makeEntityId('region'),
+    loadIds: [ ...new Set(loadIds.filter(Boolean)) ],
+    polygon: normalizePolygonFeature(region.polygon),
+    centerline: region.centerline ? normalizeLineFeature(region.centerline) : undefined,
+    createdAt: region.createdAt || timestamp,
+    updatedAt: timestamp,
+    updatedBy: actorEmail,
+  };
+  await setDoc(doc(spreadRegionsCollectionRef(year), normalizedRegion.id!), stripUndefined({
+    field: normalizedRegion.field,
+    mode: normalizedRegion.mode,
+    loadIds: normalizedRegion.loadIds,
+    polygon: serializePolygonFeature(normalizedRegion.polygon),
+    centerline: normalizedRegion.centerline ? serializeLineFeature(normalizedRegion.centerline) : undefined,
+    headingDegrees: normalizedRegion.headingDegrees,
+    spreadWidthFeet: normalizedRegion.spreadWidthFeet,
+    dateStart: normalizedRegion.dateStart,
+    dateEnd: normalizedRegion.dateEnd,
+    supersededByRegionId: normalizedRegion.supersededByRegionId,
+    createdAt: normalizedRegion.createdAt,
+    updatedAt: normalizedRegion.updatedAt,
+    updatedBy: normalizedRegion.updatedBy,
+  }));
+  info(
+    'Saved manure spread region year=%d regionId=%s loads=%d actor=%s',
+    year,
+    normalizedRegion.id!,
+    normalizedRegion.loadIds?.length || 0,
+    actorEmail,
   );
-  const nextIds = new Set(normalizedAssignments.map(assignment => assignment.id!));
-  const batch = writeBatch(firestore());
-
-  for (const docSnapshot of currentSnapshot.docs) {
-    if (!nextIds.has(docSnapshot.id)) {
-      batch.delete(docSnapshot.ref);
-    }
-  }
-
-  for (const assignment of normalizedAssignments) {
-    batch.set(doc(spreadRegionAssignmentsCollectionRef(year), assignment.id!), stripUndefined({
-      regionId: assignment.regionId,
-      loadGroupKey: assignment.loadGroupKey,
-      date: assignment.date,
-      field: assignment.field,
-      source: assignment.source,
-      loadCount: assignment.loadCount,
-      createdAt: assignment.createdAt,
-      updatedAt: assignment.updatedAt,
-      updatedBy: assignment.updatedBy,
-    }));
-  }
-
-  await batch.commit();
-  info('Saved manure spread region assignments for year=%d count=%d actor=%s', year, normalizedAssignments.length, actorEmail);
-  return sortSpreadRegionAssignments(normalizedAssignments);
+  return normalizedRegion;
 }
 
 export async function saveLoadRecord(year: number, load: LoadsRecord, actorEmail: string): Promise<LoadsRecord> {
   await ensureYearDocument(year);
 
-  const id = load.id || createLoadRecordId(load);
+  const id = load.id || makeEntityId('load');
   const timestamp = nowIso();
   const normalizedLoad: LoadsRecord = {
     ...load,
     id,
+    timestamp: load.timestamp || timestamp,
+    loggedBy: load.loggedBy || actorEmail,
+    loads: 1,
+    geojson: {
+      type: 'FeatureCollection',
+      features: load.geojson.features.slice(0, 1),
+    },
     createdAt: load.createdAt || timestamp,
     updatedAt: timestamp,
     updatedBy: actorEmail,
   };
 
   await setDoc(
-    doc(subcollectionRef(year, 'loads'), id),
+    doc(loadEventsCollectionRef(year), id),
     stripUndefined({
+      timestamp: normalizedLoad.timestamp,
+      loggedBy: normalizedLoad.loggedBy,
+      legacyLoadRecordId: normalizedLoad.legacyLoadRecordId,
       date: normalizedLoad.date,
       field: normalizedLoad.field,
       source: normalizedLoad.source,
@@ -1049,8 +1142,50 @@ export async function saveLoadRecord(year: number, load: LoadsRecord, actorEmail
   return normalizedLoad;
 }
 
+export async function appendToLoadRecord(
+  year: number,
+  load: Pick<LoadsRecord, 'date' | 'field' | 'source' | 'driver'>,
+  addedLoadCount: number,
+  addedPoints: Feature<Point>[],
+  actorEmail: string,
+): Promise<string> {
+  await ensureYearDocument(year);
+  const timestamp = nowIso();
+  const [latestPoint] = addedPoints;
+  const id = makeEntityId('load');
+  await setDoc(
+    doc(loadEventsCollectionRef(year), id),
+    stripUndefined({
+      timestamp,
+      loggedBy: actorEmail,
+      date: load.date,
+      field: load.field,
+      source: load.source,
+      driver: load.driver,
+      loads: 1,
+      geojson: {
+        type: 'FeatureCollection',
+        features: latestPoint ? [latestPoint] : [],
+      },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      updatedBy: actorEmail,
+    }),
+  );
+  info(
+    'Saved manure load event year=%d id=%s field=%s source=%s driver=%s actor=%s',
+    year,
+    id,
+    load.field,
+    load.source,
+    load.driver,
+    actorEmail,
+  );
+  return id;
+}
+
 export async function deleteLoadRecords(year: number, ids: string[]): Promise<void> {
-  const deletedCount = await deleteDocumentIds(subcollectionRef(year, 'loads'), ids);
+  const deletedCount = await deleteDocumentIds(loadEventsCollectionRef(year), ids);
   info('Deleted manure load records year=%d count=%d', year, deletedCount);
 }
 
@@ -1062,6 +1197,86 @@ export async function deleteSpreadRegionAssignments(year: number, ids: string[])
 export async function deleteSpreadRegions(year: number, ids: string[]): Promise<void> {
   const deletedCount = await deleteDocumentIds(spreadRegionsCollectionRef(year), ids);
   info('Deleted manure spread regions year=%d count=%d', year, deletedCount);
+}
+
+export async function deleteLoadHistoryBundle(
+  year: number,
+  {
+    loadRecordIds,
+    updatedRegions,
+    regionIds,
+  }: {
+    loadRecordIds: string[];
+    updatedRegions: SpreadRegion[];
+    regionIds: string[];
+  },
+): Promise<void> {
+  const deleteRefs = [
+    ...[ ...new Set(loadRecordIds.filter(Boolean)) ].map(id => doc(loadEventsCollectionRef(year), id)),
+    ...[ ...new Set(regionIds.filter(Boolean)) ].map(id => doc(spreadRegionsCollectionRef(year), id)),
+  ];
+
+  const normalizedRegions = updatedRegions.map((region) => ({
+    ...region,
+    loadIds: [ ...new Set((region.loadIds || []).filter(Boolean)) ],
+    polygon: normalizePolygonFeature(region.polygon),
+    centerline: region.centerline ? normalizeLineFeature(region.centerline) : undefined,
+  }));
+
+  if (deleteRefs.length < 1 && normalizedRegions.length < 1) {
+    return;
+  }
+
+  for (let index = 0; index < Math.max(deleteRefs.length, normalizedRegions.length); index += 400) {
+    const batch = writeBatch(firestore());
+    for (const reference of deleteRefs.slice(index, index + 400)) {
+      batch.delete(reference);
+    }
+    for (const region of normalizedRegions.slice(index, index + 400)) {
+      batch.set(doc(spreadRegionsCollectionRef(year), region.id!), stripUndefined({
+        field: region.field,
+        mode: region.mode,
+        loadIds: region.loadIds,
+        polygon: serializePolygonFeature(region.polygon),
+        centerline: region.centerline ? serializeLineFeature(region.centerline) : undefined,
+        headingDegrees: region.headingDegrees,
+        spreadWidthFeet: region.spreadWidthFeet,
+        dateStart: region.dateStart,
+        dateEnd: region.dateEnd,
+        supersededByRegionId: region.supersededByRegionId,
+        createdAt: region.createdAt,
+        updatedAt: region.updatedAt,
+        updatedBy: region.updatedBy,
+      }));
+    }
+    await batch.commit();
+  }
+
+  info(
+    'Deleted manure load history bundle year=%d loads=%d updatedRegions=%d deletedRegions=%d',
+    year,
+    loadRecordIds.length,
+    normalizedRegions.length,
+    regionIds.length,
+  );
+}
+
+export async function readLegacyLoads(year: number): Promise<LoadsRecord[]> {
+  const snapshot = await getDocsWithOfflineFallback(
+    legacyLoadsCollectionRef(year),
+    `${MANURE_YEARS_COLLECTION}/${year}/${LEGACY_LOADS_COLLECTION}`,
+    `Unable to load legacy manure loads for ${year} while offline. Connect once online so they can be cached, then retry.`,
+  );
+  return sortLoads(snapshot.docs.map(toLoad));
+}
+
+export async function readLegacySpreadRegionAssignments(year: number): Promise<SpreadRegionAssignment[]> {
+  const snapshot = await getDocsWithOfflineFallback(
+    spreadRegionAssignmentsCollectionRef(year),
+    `${MANURE_YEARS_COLLECTION}/${year}/${SPREAD_REGION_ASSIGNMENTS_COLLECTION}`,
+    `Unable to load legacy manure spread region assignments for ${year} while offline. Connect once online so they can be cached, then retry.`,
+  );
+  return sortSpreadRegionAssignments(snapshot.docs.map(toSpreadRegionAssignment));
 }
 
 export async function getAccessRecord(email: string): Promise<AccessRecord | null> {
@@ -1151,6 +1366,124 @@ export async function deleteAccessRecord(email: string): Promise<void> {
   const normalizedEmail = emailKey(email);
   await deleteDoc(accessDocRef(normalizedEmail));
   info('Deleted manure access record email=%s', normalizedEmail);
+}
+
+export function observeFields(
+  year: number,
+  listener: (fields: Field[], metadata: RealtimeSnapshotMetadata) => void,
+  onError?: (error: Error) => void,
+): () => void {
+  return observeMappedCollection(
+    metadataCollectionRef(year, 'fields'),
+    `${MANURE_YEARS_COLLECTION}/${year}/fields`,
+    toField,
+    sortByName,
+    listener,
+    onError,
+  );
+}
+
+export function observeSources(
+  year: number,
+  listener: (sources: Source[], metadata: RealtimeSnapshotMetadata) => void,
+  onError?: (error: Error) => void,
+): () => void {
+  return observeMappedCollection(
+    metadataCollectionRef(year, 'sources'),
+    `${MANURE_YEARS_COLLECTION}/${year}/sources`,
+    snapshot => normalizeSourceDefaults(toSource(snapshot)),
+    sortByName,
+    listener,
+    onError,
+  );
+}
+
+export function observeDrivers(
+  year: number,
+  listener: (drivers: Driver[], metadata: RealtimeSnapshotMetadata) => void,
+  onError?: (error: Error) => void,
+): () => void {
+  return observeMappedCollection(
+    metadataCollectionRef(year, 'drivers'),
+    `${MANURE_YEARS_COLLECTION}/${year}/drivers`,
+    toDriver,
+    sortByName,
+    listener,
+    onError,
+  );
+}
+
+export function observeLoads(
+  year: number,
+  listener: (loads: LoadsRecord[], metadata: RealtimeSnapshotMetadata) => void,
+  onError?: (error: Error) => void,
+): () => void {
+  return observeMappedCollection(
+    loadEventsCollectionRef(year),
+    `${MANURE_YEARS_COLLECTION}/${year}/${LOAD_EVENTS_COLLECTION}`,
+    toLoad,
+    sortLoads,
+    listener,
+    onError,
+  );
+}
+
+export function observeSpreadRegions(
+  year: number,
+  listener: (regions: SpreadRegion[], metadata: RealtimeSnapshotMetadata) => void,
+  onError?: (error: Error) => void,
+): () => void {
+  return observeMappedCollection(
+    spreadRegionsCollectionRef(year),
+    `${MANURE_YEARS_COLLECTION}/${year}/${SPREAD_REGIONS_COLLECTION}`,
+    toSpreadRegion,
+    sortSpreadRegions,
+    listener,
+    onError,
+  );
+}
+
+export function observeSpreadRegionAssignments(
+  year: number,
+  listener: (assignments: SpreadRegionAssignment[], metadata: RealtimeSnapshotMetadata) => void,
+  onError?: (error: Error) => void,
+): () => void {
+  return observeMappedCollection(
+    spreadRegionAssignmentsCollectionRef(year),
+    `${MANURE_YEARS_COLLECTION}/${year}/${SPREAD_REGION_ASSIGNMENTS_COLLECTION}`,
+    toSpreadRegionAssignment,
+    sortSpreadRegionAssignments,
+    listener,
+    onError,
+  );
+}
+
+export function observeAccessRecord(
+  email: string,
+  listener: (record: AccessRecord | null, metadata: RealtimeSnapshotMetadata) => void,
+  onError?: (error: Error) => void,
+): () => void {
+  return observeMappedDocument(
+    accessDocRef(email),
+    `${MANURE_ACCESS_COLLECTION}/${emailKey(email)}`,
+    toAccessRecord,
+    listener,
+    onError,
+  );
+}
+
+export function observeAccessRecords(
+  listener: (records: AccessRecord[], metadata: RealtimeSnapshotMetadata) => void,
+  onError?: (error: Error) => void,
+): () => void {
+  return observeMappedCollection(
+    accessCollectionRef(),
+    MANURE_ACCESS_COLLECTION,
+    toAccessRecord,
+    sortAccessRecords,
+    listener,
+    onError,
+  );
 }
 
 export function isAccessEnabled(record: AccessRecord | null): record is AccessRecord {

@@ -1,6 +1,7 @@
 import React from 'react';
 import { observer } from 'mobx-react-lite';
 import {
+  Alert,
   Box,
   Button,
   IconButton,
@@ -19,7 +20,14 @@ import { context } from './state';
 
 export const SourceManagementModal = observer(() => {
   const { state, actions } = React.useContext(context);
-  const { sourceModalOpen, saving, sources, sourceDraft } = state.lookupManagement;
+  const {
+    sourceModalOpen,
+    saving,
+    sources,
+    sourceDraft,
+    sourcesStale,
+    sourceKeepLocal,
+  } = state.lookupManagement;
 
   return (
     <Modal open={sourceModalOpen} onClose={() => !saving && actions.closeSourceManagementModal()}>
@@ -47,10 +55,41 @@ export const SourceManagementModal = observer(() => {
             Close
           </Button>
         </Box>
+        {sourcesStale && (
+          <Alert
+            severity="warning"
+            sx={{ mb: 2 }}
+            action={(
+              <Box sx={{ display: 'flex', gap: 1 }}>
+                <Button color="inherit" size="small" onClick={actions.keepLocalManagedSources}>
+                  Keep my edits
+                </Button>
+                <Button color="inherit" size="small" onClick={actions.reloadManagedSourcesFromServer}>
+                  Reload from server
+                </Button>
+              </Box>
+            )}
+          >
+            Source data changed in another browser. Choose whether to keep this local draft for a later save or reload the latest server sources.
+          </Alert>
+        )}
+        {!sourcesStale && sourceKeepLocal && (
+          <Alert
+            severity="info"
+            sx={{ mb: 2 }}
+            action={(
+              <Button color="inherit" size="small" onClick={actions.reloadManagedSourcesFromServer}>
+                Reload from server
+              </Button>
+            )}
+          >
+            Keeping local source edits. Saving will overwrite newer source data from the server.
+          </Alert>
+        )}
 
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2, mb: 2 }}>
           <Typography variant="subtitle1">Sources</Typography>
-          <Button variant="contained" onClick={() => void actions.saveManagedSources()} disabled={saving}>
+          <Button variant="contained" onClick={() => void actions.saveManagedSources()} disabled={saving || sourcesStale}>
             Save Sources
           </Button>
         </Box>
@@ -60,14 +99,14 @@ export const SourceManagementModal = observer(() => {
             label="Name"
             value={sourceDraft.name}
             onChange={event => actions.sourceManagementDraft({ name: event.target.value })}
-            disabled={saving}
+            disabled={saving || sourcesStale}
           />
           <TextField
             select
             label="Type"
             value={sourceDraft.type}
             onChange={event => actions.sourceManagementDraft({ type: event.target.value as 'solid' | 'liquid' })}
-            disabled={saving}
+            disabled={saving || sourcesStale}
           >
             <MenuItem value="solid">Solid</MenuItem>
             <MenuItem value="liquid">Liquid</MenuItem>
@@ -77,23 +116,23 @@ export const SourceManagementModal = observer(() => {
             type="number"
             value={sourceDraft.acPerLoad}
             onChange={event => actions.sourceManagementDraft({ acPerLoad: event.target.value })}
-            disabled={saving}
+            disabled={saving || sourcesStale}
           />
           <TextField
             label="Width (ft)"
             type="number"
             value={sourceDraft.spreadWidthFeet}
             onChange={event => actions.sourceManagementDraft({ spreadWidthFeet: event.target.value })}
-            disabled={saving}
+            disabled={saving || sourcesStale}
           />
           <TextField
             label="Load length (ft)"
             type="number"
             value={sourceDraft.defaultLoadLengthFeet}
             onChange={event => actions.sourceManagementDraft({ defaultLoadLengthFeet: event.target.value })}
-            disabled={saving}
+            disabled={saving || sourcesStale}
           />
-          <Button variant="outlined" onClick={actions.addManagedSource} disabled={saving}>
+          <Button variant="outlined" onClick={actions.addManagedSource} disabled={saving || sourcesStale}>
             Add
           </Button>
         </Box>
@@ -124,7 +163,7 @@ export const SourceManagementModal = observer(() => {
                           onChange={event => actions.updateManagedSource(rowKey, { name: event.target.value })}
                           fullWidth
                           size="small"
-                          disabled={saving}
+                          disabled={saving || sourcesStale}
                         />
                       </TableCell>
                       <TableCell sx={{ minWidth: 140 }}>
@@ -134,7 +173,7 @@ export const SourceManagementModal = observer(() => {
                           onChange={event => actions.updateManagedSource(rowKey, { type: event.target.value as 'solid' | 'liquid' })}
                           fullWidth
                           size="small"
-                          disabled={saving}
+                          disabled={saving || sourcesStale}
                         >
                           <MenuItem value="solid">Solid</MenuItem>
                           <MenuItem value="liquid">Liquid</MenuItem>
@@ -147,7 +186,7 @@ export const SourceManagementModal = observer(() => {
                           onChange={event => actions.updateManagedSource(rowKey, { acPerLoad: Number.parseFloat(event.target.value) })}
                           fullWidth
                           size="small"
-                          disabled={saving}
+                          disabled={saving || sourcesStale}
                         />
                       </TableCell>
                       <TableCell sx={{ minWidth: 140 }}>
@@ -157,7 +196,7 @@ export const SourceManagementModal = observer(() => {
                           onChange={event => actions.updateManagedSource(rowKey, { spreadWidthFeet: Number.parseFloat(event.target.value) })}
                           fullWidth
                           size="small"
-                          disabled={saving}
+                          disabled={saving || sourcesStale}
                         />
                       </TableCell>
                       <TableCell sx={{ minWidth: 160 }}>
@@ -167,11 +206,11 @@ export const SourceManagementModal = observer(() => {
                           onChange={event => actions.updateManagedSource(rowKey, { defaultLoadLengthFeet: Number.parseFloat(event.target.value) })}
                           fullWidth
                           size="small"
-                          disabled={saving}
+                          disabled={saving || sourcesStale}
                         />
                       </TableCell>
                       <TableCell align="right">
-                        <IconButton onClick={() => actions.deleteManagedSource(rowKey)} disabled={saving}>
+                        <IconButton onClick={() => actions.deleteManagedSource(rowKey)} disabled={saving || sourcesStale}>
                           <DeleteOutlineIcon />
                         </IconButton>
                       </TableCell>

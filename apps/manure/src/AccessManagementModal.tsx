@@ -1,6 +1,7 @@
 import React from 'react';
 import { observer } from 'mobx-react-lite';
 import {
+  Alert,
   Box,
   Button,
   Checkbox,
@@ -19,7 +20,7 @@ import { context } from './state';
 
 export const AccessManagementModal = observer(() => {
   const { state, actions } = React.useContext(context);
-  const { modalOpen, loading, saving, records, draft } = state.accessManagement;
+  const { modalOpen, loading, saving, records, draft, stale, keepLocal } = state.accessManagement;
 
   return (
     <Modal open={modalOpen} onClose={() => !saving && actions.closeAccessManagementModal()}>
@@ -47,6 +48,37 @@ export const AccessManagementModal = observer(() => {
             Close
           </Button>
         </Box>
+        {stale && (
+          <Alert
+            severity="warning"
+            sx={{ mb: 2 }}
+            action={(
+              <Box sx={{ display: 'flex', gap: 1 }}>
+                <Button color="inherit" size="small" onClick={actions.keepLocalManagedAccess}>
+                  Keep my edits
+                </Button>
+                <Button color="inherit" size="small" onClick={actions.reloadManagedAccessFromServer}>
+                  Reload from server
+                </Button>
+              </Box>
+            )}
+          >
+            Access data changed in another browser. Choose whether to keep this local draft for a later save or reload the latest server access records.
+          </Alert>
+        )}
+        {!stale && keepLocal && (
+          <Alert
+            severity="info"
+            sx={{ mb: 2 }}
+            action={(
+              <Button color="inherit" size="small" onClick={actions.reloadManagedAccessFromServer}>
+                Reload from server
+              </Button>
+            )}
+          >
+            Keeping local access edits. Saving will overwrite newer access data from the server.
+          </Alert>
+        )}
 
         <Box sx={{ border: '1px solid #ddd', borderRadius: 1, p: 2, mb: 3 }}>
           <Typography variant="subtitle1" sx={{ mb: 2 }}>Add or update access</Typography>
@@ -56,14 +88,14 @@ export const AccessManagementModal = observer(() => {
               value={draft.email}
               onChange={event => actions.accessManagementDraft({ email: event.target.value })}
               fullWidth
-              disabled={saving}
+              disabled={saving || stale}
             />
             <TextField
               label="Display name"
               value={draft.displayName}
               onChange={event => actions.accessManagementDraft({ displayName: event.target.value })}
               fullWidth
-              disabled={saving}
+              disabled={saving || stale}
             />
           </Box>
           <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, alignItems: 'center' }}>
@@ -72,7 +104,7 @@ export const AccessManagementModal = observer(() => {
                 <Checkbox
                   checked={draft.enabled}
                   onChange={event => actions.accessManagementDraft({ enabled: event.target.checked })}
-                  disabled={saving}
+                  disabled={saving || stale}
                 />
               )}
               label="Enabled"
@@ -82,7 +114,7 @@ export const AccessManagementModal = observer(() => {
                 <Checkbox
                   checked={draft.admin}
                   onChange={event => actions.accessManagementDraft({ admin: event.target.checked })}
-                  disabled={saving}
+                  disabled={saving || stale}
                 />
               )}
               label="Admin"
@@ -91,7 +123,7 @@ export const AccessManagementModal = observer(() => {
               variant="contained"
               color="primary"
               onClick={() => void actions.createManagedAccessRecord()}
-              disabled={saving}
+              disabled={saving || stale}
             >
               Save access
             </Button>
@@ -135,21 +167,21 @@ export const AccessManagementModal = observer(() => {
                           onChange={event => actions.updateManagedAccessRecord(record.email, { displayName: event.target.value })}
                           fullWidth
                           size="small"
-                          disabled={saving}
+                          disabled={saving || stale}
                         />
                       </TableCell>
                       <TableCell>
                         <Checkbox
                           checked={record.enabled}
                           onChange={event => actions.updateManagedAccessRecord(record.email, { enabled: event.target.checked })}
-                          disabled={saving || isCurrentUser}
+                          disabled={saving || stale || isCurrentUser}
                         />
                       </TableCell>
                       <TableCell>
                         <Checkbox
                           checked={record.admin}
                           onChange={event => actions.updateManagedAccessRecord(record.email, { admin: event.target.checked })}
-                          disabled={saving || isCurrentUser}
+                          disabled={saving || stale || isCurrentUser}
                         />
                       </TableCell>
                       <TableCell align="right">
@@ -158,7 +190,7 @@ export const AccessManagementModal = observer(() => {
                             variant="outlined"
                             size="small"
                             onClick={() => void actions.saveManagedAccessRecord(record.email)}
-                            disabled={saving}
+                            disabled={saving || stale}
                           >
                             Save
                           </Button>
@@ -167,7 +199,7 @@ export const AccessManagementModal = observer(() => {
                             color="error"
                             size="small"
                             onClick={() => void actions.deleteManagedAccessRecord(record.email)}
-                            disabled={saving || isCurrentUser}
+                            disabled={saving || stale || isCurrentUser}
                           >
                             Delete
                           </Button>
