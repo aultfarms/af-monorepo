@@ -59,7 +59,7 @@ import center from '@turf/center';
 import { point } from '@turf/helpers';
 import debug from 'debug';
 import { summarizeLoadGroupsByKey } from '../loadGroups';
-import { state, type State } from './state';
+import { defaultHistoryFilters, state, type State } from './state';
 
 const info = debug('af/manure:info');
 const warn = debug('af/manure:warn');
@@ -1044,11 +1044,7 @@ export const setHistoryFilters = action(
 
 export const clearHistoryFilters = action('clearHistoryFilters', () => {
   historyManagementState({
-    filters: {
-      drivers: [],
-      fields: [],
-      sources: [],
-    },
+    filters: defaultHistoryFilters(state.thisYear),
     selectedLoadGroupKeys: [],
     expandedLoadGroupKeys: [],
   });
@@ -1742,11 +1738,7 @@ export const resetSessionData = action('resetSessionData', () => {
     selectedLoadGroupKeys: [],
     expandedLoadGroupKeys: [],
     deleting: false,
-    filters: {
-      drivers: [],
-      fields: [],
-      sources: [],
-    },
+    filters: defaultHistoryFilters(state.thisYear),
   });
   drawState({
     enabled: false,

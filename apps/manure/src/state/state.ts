@@ -53,10 +53,14 @@ export type ActivityOverlayState = {
   title: string;
   message: string;
 };
+export type HistoryDatePreset = 'today' | 'thisWeek' | 'last7Days' | 'thisMonth' | 'thisYear' | 'custom';
 export type HistoryFilters = {
   drivers: string[];
   fields: string[];
   sources: string[];
+  datePreset: HistoryDatePreset;
+  dateStart: string;
+  dateEnd: string;
 };
 export type MigrationState = {
   modalOpen: boolean;
@@ -241,11 +245,14 @@ function emptyActivityOverlayState(): ActivityOverlayState {
   };
 }
 
-function emptyHistoryFilters(): HistoryFilters {
+export function defaultHistoryFilters(year = new Date().getFullYear()): HistoryFilters {
   return {
     drivers: [],
     fields: [],
     sources: [],
+    datePreset: 'thisYear',
+    dateStart: `${year}-01-01`,
+    dateEnd: `${year}-12-31`,
   };
 }
 
@@ -301,8 +308,10 @@ try {
   info('No valid previous map center/zoom found in localStorage, using default');
 }
 
+const initialYear = new Date().getFullYear();
+
 export const state = observable<State>({
-  thisYear: new Date().getFullYear(),
+  thisYear: initialYear,
   auth: {
     status: 'checking',
     email: '',
@@ -350,7 +359,7 @@ export const state = observable<State>({
     selectedLoadGroupKeys: [],
     expandedLoadGroupKeys: [],
     deleting: false,
-    filters: emptyHistoryFilters(),
+    filters: defaultHistoryFilters(initialYear),
   },
   draw: emptyDrawManagementState(),
   activityOverlay: emptyActivityOverlayState(),

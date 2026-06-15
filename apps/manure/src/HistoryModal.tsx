@@ -19,6 +19,7 @@ import {
   TableHead,
   TablePagination,
   TableRow,
+  TextField,
   Typography,
 } from '@mui/material';
 import type { SelectChangeEvent } from '@mui/material/Select';
@@ -27,6 +28,7 @@ import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight';
 import { summarizeLoadGroups, summarizeLoadGroupsByKey, type LoadGroupSummary } from './loadGroups';
 import { context } from './state';
+import type { HistoryDatePreset } from './state/state';
 
 const DEFAULT_ROWS_PER_PAGE = 30;
 const ROWS_PER_PAGE_OPTIONS = [ 30, 50, 100 ];
@@ -34,9 +36,126 @@ const ROWS_PER_PAGE_OPTIONS = [ 30, 50, 100 ];
 type HistoryRow = LoadGroupSummary & {
   partialMatch: boolean;
 };
+type DateRange = {
+  dateStart: string;
+  dateEnd: string;
+};
+type TallyItem = {
+  label: string;
+  value: number;
+};
+type SummaryRow = {
+  type: 'Driver' | 'Field' | 'Source';
+  name: string;
+  loads: number;
+};
+
+const DATE_PRESETS: Array<{ key: HistoryDatePreset; label: string }> = [
+  { key: 'today', label: 'Today' },
+  { key: 'thisWeek', label: 'This week' },
+  { key: 'last7Days', label: 'Last 7 days' },
+  { key: 'thisMonth', label: 'This month' },
+  { key: 'thisYear', label: 'This year' },
+  { key: 'custom', label: 'Custom' },
+];
 
 function uniqueSorted(values: string[]): string[] {
   return [ ...new Set(values.filter(Boolean)) ].sort((left, right) => left.localeCompare(right));
+}
+
+function toDateInputValue(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function addDays(date: Date, days: number): Date {
+  const nextDate = new Date(date);
+  nextDate.setDate(nextDate.getDate() + days);
+  return nextDate;
+}
+
+function presetDateRange(datePreset: Exclude<HistoryDatePreset, 'custom'>, year: number): DateRange {
+  const today = new Date();
+
+  if (datePreset === 'today') {
+    const todayValue = toDateInputValue(today);
+    return {
+      dateStart: todayValue,
+      dateEnd: todayValue,
+    };
+  }
+
+  if (datePreset === 'thisWeek') {
+    const dateStart = addDays(today, -today.getDay());
+    return {
+      dateStart: toDateInputValue(dateStart),
+      dateEnd: toDateInputValue(addDays(dateStart, 6)),
+    };
+  }
+
+  if (datePreset === 'last7Days') {
+    return {
+      dateStart: toDateInputValue(addDays(today, -6)),
+      dateEnd: toDateInputValue(today),
+    };
+  }
+
+  if (datePreset === 'thisMonth') {
+    const dateStart = new Date(today.getFullYear(), today.getMonth(), 1);
+    const dateEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+    return {
+      dateStart: toDateInputValue(dateStart),
+      dateEnd: toDateInputValue(dateEnd),
+    };
+  }
+
+  return {
+    dateStart: `${year}-01-01`,
+    dateEnd: `${year}-12-31`,
+  };
+}
+
+function normalizeDateInput(value: string): string {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : '';
+}
+
+function loadDateInRange(loadDate: string, dateStart: string, dateEnd: string): boolean {
+  const normalizedLoadDate = normalizeDateInput(loadDate);
+  if (!normalizedLoadDate) {
+    return false;
+  }
+
+  let normalizedDateStart = normalizeDateInput(dateStart);
+  let normalizedDateEnd = normalizeDateInput(dateEnd);
+  if (normalizedDateStart && normalizedDateEnd && normalizedDateStart > normalizedDateEnd) {
+    [ normalizedDateStart, normalizedDateEnd ] = [ normalizedDateEnd, normalizedDateStart ];
+  }
+
+  return (
+    (!normalizedDateStart || normalizedLoadDate >= normalizedDateStart)
+    && (!normalizedDateEnd || normalizedLoadDate <= normalizedDateEnd)
+  );
+}
+
+function buildSummaryRows(
+  type: SummaryRow['type'],
+  values: Array<{ name: string; loads: number }>,
+): SummaryRow[] {
+  const loadsByName = new Map<string, number>();
+  for (const value of values) {
+    const name = value.name || '—';
+    loadsByName.set(name, (loadsByName.get(name) || 0) + value.loads);
+  }
+
+  return [ ...loadsByName.entries() ]
+    .map(([ name, loads ]) => ({ type, name, loads }))
+    .sort((left, right) => {
+      const byLoads = right.loads - left.loads;
+      if (byLoads !== 0) return byLoads;
+      return left.name.localeCompare(right.name);
+    });
 }
 
 function normalizeMultiSelectValue(value: string[] | string): string[] {
@@ -97,13 +216,18 @@ export const HistoryModal = observer(() => {
     () => summarizeLoadGroupsByKey(state.loads, state.regions, state.thisYear),
     [state.loads, state.regions, state.thisYear],
   );
+  const defaultDateRange = React.useMemo(
+    () => presetDateRange('thisYear', state.thisYear),
+    [state.thisYear],
+  );
   const filteredLoads = React.useMemo(
     () => state.loads.filter(load => (
-      (filters.drivers.length < 1 || filters.drivers.includes(load.driver))
+      loadDateInRange(load.date, filters.dateStart, filters.dateEnd)
+      && (filters.drivers.length < 1 || filters.drivers.includes(load.driver))
       && (filters.fields.length < 1 || filters.fields.includes(load.field))
       && (filters.sources.length < 1 || filters.sources.includes(load.source))
     )),
-    [filters.drivers, filters.fields, filters.sources, state.loads],
+    [filters.dateEnd, filters.dateStart, filters.drivers, filters.fields, filters.sources, state.loads],
   );
   const rows = React.useMemo<HistoryRow[]>(
     () => summarizeLoadGroups(filteredLoads, state.regions, state.thisYear).map(row => {
@@ -131,7 +255,39 @@ export const HistoryModal = observer(() => {
     () => rows.filter(row => row.partialMatch).length,
     [rows],
   );
-  const hasActiveFilters = filters.drivers.length > 0 || filters.fields.length > 0 || filters.sources.length > 0;
+  const summaryRows = React.useMemo<SummaryRow[]>(
+    () => [
+      ...buildSummaryRows('Driver', filteredLoads.map(load => ({ name: load.driver, loads: load.loads }))),
+      ...buildSummaryRows('Field', filteredLoads.map(load => ({ name: load.field, loads: load.loads }))),
+      ...buildSummaryRows('Source', filteredLoads.map(load => ({ name: load.source, loads: load.loads }))),
+    ],
+    [filteredLoads],
+  );
+  const tallyItems = React.useMemo<TallyItem[]>(() => {
+    const uniqueRegionIds = new Set(rows.flatMap(row => row.regionIds));
+    return [
+      { label: 'Days', value: new Set(filteredLoads.map(load => load.date).filter(Boolean)).size },
+      { label: 'Fields', value: new Set(filteredLoads.map(load => load.field).filter(Boolean)).size },
+      { label: 'Sources', value: new Set(filteredLoads.map(load => load.source).filter(Boolean)).size },
+      { label: 'Drivers', value: new Set(filteredLoads.map(load => load.driver).filter(Boolean)).size },
+      { label: 'Loads', value: filteredLoads.reduce((sum, load) => sum + load.loads, 0) },
+      { label: 'Rows', value: rows.length },
+      { label: 'Assigned', value: rows.reduce((sum, row) => sum + row.assignedLoads, 0) },
+      { label: 'Unassigned', value: rows.reduce((sum, row) => sum + row.unassignedLoads, 0) },
+      { label: 'Regions', value: uniqueRegionIds.size },
+    ];
+  }, [filteredLoads, rows]);
+  const hasActiveDateFilter = (
+    filters.datePreset !== 'thisYear'
+    || filters.dateStart !== defaultDateRange.dateStart
+    || filters.dateEnd !== defaultDateRange.dateEnd
+  );
+  const hasActiveFilters = (
+    hasActiveDateFilter
+    || filters.drivers.length > 0
+    || filters.fields.length > 0
+    || filters.sources.length > 0
+  );
 
   React.useEffect(() => {
     const maxPage = Math.max(Math.ceil(rows.length / rowsPerPage) - 1, 0);
@@ -152,6 +308,26 @@ export const HistoryModal = observer(() => {
     actions.setHistoryFilters({
       [key]: normalizeMultiSelectValue(event.target.value),
     } as Pick<typeof filters, typeof key>);
+  }, [actions]);
+
+  const setDatePreset = React.useCallback((datePreset: HistoryDatePreset) => {
+    if (datePreset === 'custom') {
+      actions.setHistoryFilters({ datePreset });
+      return;
+    }
+
+    actions.setHistoryFilters({
+      datePreset,
+      ...presetDateRange(datePreset, state.thisYear),
+    });
+  }, [actions, state.thisYear]);
+
+  const setCustomDateBoundary = React.useCallback((key: 'dateStart' | 'dateEnd', value: string) => {
+    const nextFilters: Partial<typeof filters> = {
+      datePreset: 'custom',
+    };
+    nextFilters[key] = value;
+    actions.setHistoryFilters(nextFilters);
   }, [actions]);
 
   return (
@@ -211,6 +387,45 @@ export const HistoryModal = observer(() => {
           </Box>
         </Box>
 
+        <Stack
+          direction={{ xs: 'column', lg: 'row' }}
+          spacing={1.5}
+          alignItems={{ xs: 'stretch', lg: 'center' }}
+          sx={{ mb: 2 }}
+        >
+          <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+            {DATE_PRESETS.map(datePreset => (
+              <Button
+                key={datePreset.key}
+                size="small"
+                variant={filters.datePreset === datePreset.key ? 'contained' : 'outlined'}
+                onClick={() => setDatePreset(datePreset.key)}
+              >
+                {datePreset.label}
+              </Button>
+            ))}
+          </Stack>
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
+            <TextField
+              label="Start"
+              type="date"
+              size="small"
+              value={filters.dateStart}
+              onChange={event => setCustomDateBoundary('dateStart', event.target.value)}
+              sx={{ minWidth: 160 }}
+              InputLabelProps={{ shrink: true }}
+            />
+            <TextField
+              label="End"
+              type="date"
+              size="small"
+              value={filters.dateEnd}
+              onChange={event => setCustomDateBoundary('dateEnd', event.target.value)}
+              sx={{ minWidth: 160 }}
+              InputLabelProps={{ shrink: true }}
+            />
+          </Stack>
+        </Stack>
         <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} sx={{ mb: 2 }}>
           <FormControl size="small" sx={{ minWidth: 220, flex: 1 }}>
             <InputLabel id="history-driver-filter-label">Drivers</InputLabel>
@@ -273,6 +488,54 @@ export const HistoryModal = observer(() => {
           {deleting ? ' • Deleting…' : ''}
           {partialRowCount > 0 ? ` • ${partialRowCount} filtered subset row${partialRowCount === 1 ? ' is' : 's are'} view-only until filters include the full grouped row.` : ''}
         </Typography>
+        <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 1, mb: 2 }}>
+          {tallyItems.map(item => (
+            <Box
+              key={item.label}
+              sx={{
+                border: '1px solid',
+                borderColor: 'divider',
+                borderRadius: 1,
+                bgcolor: 'grey.50',
+                px: 1.5,
+                py: 1,
+              }}
+            >
+              <Typography variant="caption" color="text.secondary">
+                {item.label}
+              </Typography>
+              <Typography variant="subtitle1" sx={{ lineHeight: 1.2 }}>
+                {item.value}
+              </Typography>
+            </Box>
+          ))}
+        </Box>
+
+        {summaryRows.length > 0 && (
+          <Box sx={{ overflowX: 'auto', mb: 2 }}>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Summary
+            </Typography>
+            <Table size="small" sx={{ maxWidth: 640 }}>
+              <TableHead>
+                <TableRow>
+                  <TableCell>Type</TableCell>
+                  <TableCell>Name</TableCell>
+                  <TableCell align="right">Loads</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {summaryRows.map(row => (
+                  <TableRow key={`${row.type}-${row.name}`}>
+                    <TableCell>{row.type}</TableCell>
+                    <TableCell>{row.name}</TableCell>
+                    <TableCell align="right">{row.loads}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </Box>
+        )}
 
         {rows.length === 0 ? (
           <Typography color="text.secondary">
