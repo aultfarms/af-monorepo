@@ -24,6 +24,7 @@ import {
 } from '@mui/material';
 import type { SelectChangeEvent } from '@mui/material/Select';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight';
 import { summarizeLoadGroups, summarizeLoadGroupsByKey, type LoadGroupSummary } from './loadGroups';
@@ -193,10 +194,15 @@ export const HistoryModal = observer(() => {
   const { modalOpen, deleting, filters, expandedLoadGroupKeys } = state.historyManagement;
   const [page, setPage] = React.useState(0);
   const [rowsPerPage, setRowsPerPage] = React.useState(DEFAULT_ROWS_PER_PAGE);
+  const [correctionOpen, setCorrectionOpen] = React.useState(false);
+  const [correctionPercent, setCorrectionPercent] = React.useState('');
 
   React.useEffect(() => {
     if (modalOpen) {
       setPage(0);
+    } else {
+      setCorrectionOpen(false);
+      setCorrectionPercent('');
     }
   }, [modalOpen]);
 
@@ -329,6 +335,15 @@ export const HistoryModal = observer(() => {
     nextFilters[key] = value;
     actions.setHistoryFilters(nextFilters);
   }, [actions]);
+
+  const applyCorrection = React.useCallback(async () => {
+    const percent = Number.parseFloat(correctionPercent);
+    const applied = await actions.applyHistoryCorrection(filteredLoads, percent);
+    if (applied) {
+      setCorrectionOpen(false);
+      setCorrectionPercent('');
+    }
+  }, [actions, correctionPercent, filteredLoads]);
 
   return (
     <Modal open={modalOpen} onClose={() => !deleting && actions.closeHistoryModal()}>
@@ -676,6 +691,53 @@ export const HistoryModal = observer(() => {
             />
           </React.Fragment>
         )}
+        {state.auth.admin && (
+          <Box sx={{ mt: 1, display: 'flex', justifyContent: 'flex-start' }}>
+            <IconButton
+              size="small"
+              disabled={deleting || filteredLoads.length < 1}
+              onClick={() => setCorrectionOpen(true)}
+              aria-label="Edit"
+              sx={{ color: 'text.secondary' }}
+            >
+              <EditOutlinedIcon fontSize="small" />
+            </IconButton>
+          </Box>
+        )}
+        <Modal open={correctionOpen} onClose={() => !deleting && setCorrectionOpen(false)}>
+          <Box
+            component="form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void applyCorrection();
+            }}
+            sx={{
+              position: 'absolute',
+              top: '50%',
+              left: '50%',
+              transform: 'translate(-50%, -50%)',
+              width: 'min(280px, calc(100vw - 32px))',
+              bgcolor: 'white',
+              p: 2,
+              boxSizing: 'border-box',
+            }}
+          >
+            <Stack spacing={2}>
+              <TextField
+                label="%"
+                type="number"
+                size="small"
+                value={correctionPercent}
+                onChange={event => setCorrectionPercent(event.target.value)}
+                inputProps={{ min: 0, step: 1 }}
+                autoFocus
+              />
+              <Button type="submit" variant="contained" disabled={deleting}>
+                Apply
+              </Button>
+            </Stack>
+          </Box>
+        </Modal>
       </Box>
     </Modal>
   );

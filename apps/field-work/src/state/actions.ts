@@ -29,7 +29,7 @@ import {
   type OperationOption,
   type OperationOptionInput,
 } from '@aultfarms/field-work';
-import { boundsForBoundary, boundsForFields, boundsForPoint, extendBoundsToIncludePoint, parseKMZIntoEditableFields } from '../util';
+import { boundsForBoundary, boundsForFields, boundsForPoint, parseKMZIntoEditableFields } from '../util';
 import { state, type AppIssue, type EditableCrop, type EditableField, type EditableOption, type State } from './state';
 
 const info = debug('af/field-work:info');
@@ -77,13 +77,6 @@ function scrollMapElementIntoView(): void {
 function queueMapBounds(nextBounds: State['mapBounds']): void {
   state.mapBounds = nextBounds;
   state.mapCommandId += 1;
-}
-
-function boundsIncludingCurrentLocation(nextBounds: State['mapBounds']): State['mapBounds'] {
-  if (!state.currentLocation) {
-    return nextBounds;
-  }
-  return extendBoundsToIncludePoint(nextBounds, state.currentLocation.center);
 }
 
 function readStoredTrelloToken(): string {
@@ -699,7 +692,7 @@ export const fitAllFields = action('fitAllFields', () => {
   const fields = state.mode === 'field_manager'
     ? state.fieldDrafts
     : (state.board?.fields || []).map(editableFieldFromDefinition);
-  const nextBounds = boundsIncludingCurrentLocation(boundsForFields(fields));
+  const nextBounds = boundsForFields(fields);
   if (!nextBounds) {
     return;
   }
@@ -709,13 +702,13 @@ export const fitAllFields = action('fitAllFields', () => {
 export const moveMapToField = action('moveMapToField', (fieldName: string) => {
   const managerField = state.fieldDrafts.find(field => field.name === fieldName) || null;
   if (managerField?.boundary) {
-    queueMapBounds(boundsIncludingCurrentLocation(boundsForBoundary(managerField.boundary)));
+    queueMapBounds(boundsForBoundary(managerField.boundary));
     return;
   }
 
   const boardField = state.board?.fields.find(field => field.name === fieldName) || null;
   if (boardField?.boundary) {
-    queueMapBounds(boundsIncludingCurrentLocation(boundsForBoundary(boardField.boundary)));
+    queueMapBounds(boundsForBoundary(boardField.boundary));
   }
 });
 

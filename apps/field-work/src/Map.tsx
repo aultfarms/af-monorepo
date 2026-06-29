@@ -1,7 +1,6 @@
 import React, { useEffect } from 'react';
 import { observer } from 'mobx-react-lite';
 import { Circle, CircleMarker, GeoJSON, MapContainer, TileLayer, useMap, useMapEvents } from 'react-leaflet';
-import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import type { Feature, FeatureCollection, MultiPolygon, Polygon } from 'geojson';
 import { context } from './state';
@@ -53,20 +52,6 @@ const MapController = observer(() => {
       maxZoom: 18,
     });
   }, [map, state.mapBounds, state.mapCommandId]);
-  useEffect(() => {
-    const currentLocation = state.currentLocation?.center;
-    if (!currentLocation || map.getBounds().contains(currentLocation)) {
-      return;
-    }
-
-    const mapBounds = map.getBounds();
-    const nextBounds = L.latLngBounds(mapBounds.getSouthWest(), mapBounds.getNorthEast());
-    nextBounds.extend(currentLocation);
-    map.fitBounds(nextBounds, {
-      padding: [ 24, 24 ],
-      maxZoom: map.getZoom(),
-    });
-  }, [map, state.currentLocation]);
 
   return null;
 });

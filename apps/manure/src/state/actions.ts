@@ -427,6 +427,126 @@ function revalidateDrawTargets(): void {
   });
 }
 
+type LoadHistoryDeleteBundle = {
+  loadRecordIds: string[];
+  updatedRegions: SpreadRegion[];
+  regionIds: string[];
+};
+type LoadCorrectionPlan = {
+  loadRecordIds: string[];
+  loadTemplates: LoadsRecord[];
+};
+
+function loadRecordKey(load: LoadsRecord): string {
+  return load.id || [
+    createLoadGroupKey(load),
+    load.driver,
+    load.timestamp || load.createdAt || load.updatedAt || '',
+  ].join('__');
+}
+
+function loadSortKey(load: LoadsRecord): string {
+  return [
+    load.date,
+    load.timestamp || load.createdAt || load.updatedAt || '',
+    load.driver,
+    loadRecordKey(load),
+  ].join('__');
+}
+
+function buildLoadHistoryDeleteBundle(loadRecordIds: string[]): LoadHistoryDeleteBundle {
+  const loadRecordIdSet = new Set(loadRecordIds);
+  const updatedRegions: SpreadRegion[] = [];
+  const regionIds: string[] = [];
+
+  for (const region of state.regions) {
+    const remainingLoadIds = (region.loadIds || []).filter(loadId => !loadRecordIdSet.has(loadId));
+    if (remainingLoadIds.length === (region.loadIds || []).length) {
+      continue;
+    }
+    if (remainingLoadIds.length < 1) {
+      if (region.id) {
+        regionIds.push(region.id);
+      }
+      continue;
+    }
+    updatedRegions.push({
+      ...region,
+      loadIds: remainingLoadIds,
+    });
+  }
+
+  return {
+    loadRecordIds,
+    updatedRegions,
+    regionIds,
+  };
+}
+
+function sample<T>(items: T[]): T | undefined {
+  return items[Math.floor(Math.random() * items.length)];
+}
+function roundDelta(value: number): number {
+  return value < 0 ? -Math.round(Math.abs(value)) : Math.round(value);
+}
+
+function loadTemplate(dayLoads: LoadsRecord[]): LoadsRecord | undefined {
+  const candidates = dayLoads.filter(load => load.date && load.field && load.source && load.driver);
+  const field = sample([ ...new Set(candidates.map(load => load.field)) ]);
+  if (!field) {
+    return undefined;
+  }
+
+  const fieldLoads = candidates.filter(load => load.field === field);
+  const driver = sample([ ...new Set(fieldLoads.map(load => load.driver)) ]);
+  if (!driver) {
+    return undefined;
+  }
+  return sample(fieldLoads.filter(load => load.driver === driver));
+}
+
+function correctionPlan(activeLoads: LoadsRecord[], percent: number): LoadCorrectionPlan {
+  const byDate = new Map<string, LoadsRecord[]>();
+  const seenIds = new Set<string>();
+
+  for (const load of activeLoads) {
+    const id = loadRecordKey(load);
+    if (!id || seenIds.has(id)) {
+      continue;
+    }
+    seenIds.add(id);
+    byDate.set(load.date, [ ...(byDate.get(load.date) || []), load ]);
+  }
+  const loadRecordIds: string[] = [];
+  const loadTemplates: LoadsRecord[] = [];
+  for (const dayLoads of byDate.values()) {
+    const totalLoads = dayLoads.reduce((sum, load) => sum + load.loads, 0);
+    const delta = roundDelta(((percent - 100) / 100) * totalLoads);
+    if (delta < 0) {
+      let removeLoads = -delta;
+      for (const load of [ ...dayLoads ].sort((left, right) => loadSortKey(right).localeCompare(loadSortKey(left)))) {
+        if (removeLoads <= 0) {
+          break;
+        }
+        loadRecordIds.push(loadRecordKey(load));
+        removeLoads -= load.loads;
+      }
+    } else if (delta > 0) {
+      for (let index = 0; index < delta; index += 1) {
+        const template = loadTemplate(dayLoads);
+        if (template) {
+          loadTemplates.push(template);
+        }
+      }
+    }
+  }
+
+  return {
+    loadRecordIds: [ ...new Set(loadRecordIds) ],
+    loadTemplates,
+  };
+}
+
 type Unsubscribe = () => void;
 
 let activeSessionGeneration = 0;
@@ -1082,34 +1202,11 @@ export const deleteHistoryLoadGroups = action('deleteHistoryLoadGroups', async (
   }
 
   const selectedSet = new Set(groups.map(group => group.loadGroupKey));
-  const loadRecordIdsToDelete = groups.flatMap(group => group.loadRows.map(row => row.id));
-  const loadRecordIdSet = new Set(loadRecordIdsToDelete);
-  const updatedRegions: SpreadRegion[] = [];
-  const regionIdsToDelete: string[] = [];
-  for (const region of state.regions) {
-    const remainingLoadIds = (region.loadIds || []).filter(loadId => !loadRecordIdSet.has(loadId));
-    if (remainingLoadIds.length === (region.loadIds || []).length) {
-      continue;
-    }
-    if (remainingLoadIds.length < 1) {
-      if (region.id) {
-        regionIdsToDelete.push(region.id);
-      }
-      continue;
-    }
-    updatedRegions.push({
-      ...region,
-      loadIds: remainingLoadIds,
-    });
-  }
+  const deleteBundle = buildLoadHistoryDeleteBundle(groups.flatMap(group => group.loadRows.map(row => row.id)));
 
   historyManagementState({ deleting: true });
   try {
-    await deleteLoadHistoryBundle(state.thisYear, {
-      loadRecordIds: loadRecordIdsToDelete,
-      updatedRegions,
-      regionIds: regionIdsToDelete,
-    });
+    await deleteLoadHistoryBundle(state.thisYear, deleteBundle);
     historyManagementState({
       selectedLoadGroupKeys: state.historyManagement.selectedLoadGroupKeys.filter(key => !selectedSet.has(key)),
       expandedLoadGroupKeys: state.historyManagement.expandedLoadGroupKeys.filter(key => !selectedSet.has(key)),
@@ -1118,6 +1215,53 @@ export const deleteHistoryLoadGroups = action('deleteHistoryLoadGroups', async (
   } catch (error) {
     warn('Error deleting grouped manure load history. Error=%O', error);
     snackbarMessage(`Error deleting grouped loads: ${(error as Error).message}`);
+  } finally {
+    historyManagementState({ deleting: false });
+  }
+});
+export const applyHistoryCorrection = action('applyHistoryCorrection', async (
+  activeLoads: LoadsRecord[],
+  percent: number,
+): Promise<boolean> => {
+  if (!state.auth.admin) {
+    snackbarMessage('Only admins can edit load history.');
+    return false;
+  }
+  if (!Number.isFinite(percent) || percent < 0) {
+    snackbarMessage('% must be 0 or more.');
+    return false;
+  }
+  const plan = correctionPlan(activeLoads, percent);
+  if (plan.loadRecordIds.length < 1 && plan.loadTemplates.length < 1) {
+    snackbarMessage('No loads to edit.');
+    return false;
+  }
+
+  historyManagementState({ deleting: true });
+  try {
+    if (plan.loadRecordIds.length > 0) {
+      await deleteLoadHistoryBundle(state.thisYear, buildLoadHistoryDeleteBundle(plan.loadRecordIds));
+    }
+    for (const template of plan.loadTemplates) {
+      const latestPoint = template.geojson.features[template.geojson.features.length - 1];
+      await appendToLoadRecord(
+        state.thisYear,
+        template,
+        1,
+        latestPoint ? [ latestPoint ] : [],
+        currentActorEmail(),
+      );
+    }
+    historyManagementState({
+      selectedLoadGroupKeys: [],
+      expandedLoadGroupKeys: [],
+    });
+    snackbarMessage('Edit applied');
+    return true;
+  } catch (error) {
+    warn('Error editing manure load history. Error=%O', error);
+    snackbarMessage(`Error editing loads: ${(error as Error).message}`);
+    return false;
   } finally {
     historyManagementState({ deleting: false });
   }
